@@ -31,6 +31,25 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(parsed["version"], 1)
         self.assertEqual(len(parsed["prompts"]), len(state["prompts"]))
 
+    def test_hidden_flags_are_preserved(self):
+        state, warnings = normalize_state(
+            {
+                "folders": [{"id": "folder1", "name": "Private", "hidden": True}],
+                "prompts": [
+                    {
+                        "id": "prompt1",
+                        "title": "Hidden prompt",
+                        "text": "secret",
+                        "folderId": "folder1",
+                        "hidden": True,
+                    }
+                ],
+            }
+        )
+        self.assertFalse(warnings)
+        self.assertTrue(state["folders"][0]["hidden"])
+        self.assertTrue(state["prompts"][0]["hidden"])
+
     def test_merge_avoids_folder_prompt_and_variable_conflicts(self):
         current = {
             "version": 1,

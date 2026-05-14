@@ -36,7 +36,7 @@ def default_state() -> Dict[str, Any]:
         "selectedFolderId": "all",
         "selectedPromptId": prompt_id,
         "search": "",
-        "folders": [{"id": folder_id, "name": "Portraits"}],
+        "folders": [{"id": folder_id, "name": "Portraits", "hidden": False}],
         "prompts": [
             {
                 "id": prompt_id,
@@ -47,6 +47,7 @@ def default_state() -> Dict[str, Any]:
                 "tags": ["portrait", "cinematic"],
                 "favorite": False,
                 "locked": False,
+                "hidden": False,
                 "createdAt": now,
                 "updatedAt": now,
             }
@@ -163,7 +164,7 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
         warnings.append(f"Unsupported schema version '{version}', attempting version 1 normalization.")
 
     used_folder_ids: set[str] = set()
-    folders: List[Dict[str, str]] = []
+    folders: List[Dict[str, Any]] = []
     for item in _as_list(data.get("folders")):
         if not isinstance(item, Mapping):
             warnings.append("Ignored malformed folder entry.")
@@ -171,7 +172,7 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
         folder_id = _unique_id(item.get("id"), "folder", used_folder_ids)
         raw_name = _as_text(item.get("name"), "Folder")
         name = raw_name if raw_name.strip() else "Folder"
-        folders.append({"id": folder_id, "name": name})
+        folders.append({"id": folder_id, "name": name, "hidden": _as_bool(item.get("hidden"))})
 
     folder_ids = {folder["id"] for folder in folders}
     used_prompt_ids: set[str] = set()
@@ -198,6 +199,7 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
                 "tags": _normalize_tags(item.get("tags")),
                 "favorite": _as_bool(item.get("favorite")),
                 "locked": _as_bool(item.get("locked")),
+                "hidden": _as_bool(item.get("hidden")),
                 "createdAt": created,
                 "updatedAt": updated,
             }

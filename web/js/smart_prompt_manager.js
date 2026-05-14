@@ -58,7 +58,7 @@ function defaultState() {
     selectedFolderId: "all",
     selectedPromptId: promptId,
     search: "",
-    folders: [{ id: folderId, name: "Portraits" }],
+    folders: [{ id: folderId, name: "Portraits", hidden: false }],
     prompts: [
       {
         id: promptId,
@@ -69,6 +69,7 @@ function defaultState() {
         tags: ["portrait", "cinematic"],
         favorite: false,
         locked: false,
+        hidden: false,
         createdAt: created,
         updatedAt: created,
       },
@@ -154,7 +155,7 @@ function normalizeState(data) {
     if (!id || folderIds.has(id) || ["all", "unsorted", "favorites"].includes(id)) id = makeId("folder");
     folderIds.add(id);
     const rawName = String(folder.name ?? "");
-    folders.push({ id, name: rawName.trim() ? rawName : "Folder" });
+    folders.push({ id, name: rawName.trim() ? rawName : "Folder", hidden: Boolean(folder.hidden) });
   }
   const prompts = [];
   const promptIds = new Set();
@@ -174,6 +175,7 @@ function normalizeState(data) {
       tags: normalizeTags(prompt.tags),
       favorite: Boolean(prompt.favorite),
       locked: Boolean(prompt.locked),
+      hidden: Boolean(prompt.hidden),
       createdAt: String(prompt.createdAt || nowIso()),
       updatedAt: String(prompt.updatedAt || nowIso()),
     });
@@ -224,6 +226,20 @@ function selectedPrompt(state) {
 function folderName(state, folderId) {
   if (!folderId) return "Unsorted";
   return state.folders.find((folder) => folder.id === folderId)?.name || "Missing folder";
+}
+
+function folderById(state, folderId) {
+  if (!folderId) return null;
+  return state.folders.find((folder) => folder.id === folderId) || null;
+}
+
+function isPreviewHidden(state, prompt) {
+  if (!prompt) return false;
+  return Boolean(prompt.hidden || folderById(state, prompt.folderId)?.hidden);
+}
+
+function hasHiddenPreviews(state) {
+  return state.prompts.some((prompt) => isPreviewHidden(state, prompt));
 }
 
 function variablesUsed(text) {
@@ -441,6 +457,7 @@ function enhanceNode(node) {
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
   let tooltip = null;
   let lastThemeKey = "";
+  let nodeHovering = false;
   const root = createElement("div", "spm-root");
 
   const seedWidget = node.widgets?.find((widget) => widget.name === "seed");
@@ -830,6 +847,7 @@ function enhanceNode(node) {
         tags: [],
         favorite: false,
         locked: false,
+        hidden: false,
         createdAt: created,
         updatedAt: created,
       };
@@ -923,6 +941,7 @@ function enhanceNode(node) {
             <div class="spm-row-wrap">
               <label><input type="checkbox" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
               <label><input type="checkbox" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
+              <label><input type="checkbox" data-dialog-prompt-bool="hidden" ${prompt.hidden ? "checked" : ""}> Hidden preview</label>
             </div>
             <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
             <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
@@ -1021,7 +1040,7 @@ function enhanceNode(node) {
           : dialogFolderFilter === "unsorted"
             ? ""
             : "";
-        prompt = { id: makeId("prompt"), title: "", text: "", description: "", folderId, tags: [], favorite: false, locked: false, createdAt: created, updatedAt: created };
+        prompt = { id: makeId("prompt"), title: "", text: "", description: "", folderId, tags: [], favorite: false, locked: false, hidden: false, createdAt: created, updatedAt: created };
         isDraft = true;
         autocomplete.open = false;
         renderPromptDialog({ selector: "[data-dialog-prompt-field='title']", select: true });
@@ -1035,7 +1054,7 @@ function enhanceNode(node) {
       }
       if (action === "delete-prompt" && !isDraft && confirm(`Delete prompt "${prompt.title}"?`)) {
         state.prompts = state.prompts.filter((item) => item.id !== prompt.id);
-        prompt = state.prompts[0] || { id: makeId("prompt"), title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, createdAt: nowIso(), updatedAt: nowIso() };
+        prompt = state.prompts[0] || { id: makeId("prompt"), title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, hidden: false, createdAt: nowIso(), updatedAt: nowIso() };
         isDraft = !state.prompts.length;
         state.selectedPromptId = isDraft ? "" : prompt.id;
         saveWithoutRender();
@@ -1195,6 +1214,7 @@ function enhanceNode(node) {
           return `<div class="spm-row" data-folder-row="${escapeHtml(folder.id)}">
             <button class="spm-btn spm-btn-quiet" data-dialog-folder-select="${escapeHtml(folder.id)}">${state.selectedFolderId === folder.id ? "Selected" : "Select"}</button>
             <input type="text" data-dialog-folder-name="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" style="flex:1">
+            <label class="spm-mini"><input type="checkbox" data-dialog-folder-hidden="${escapeHtml(folder.id)}" ${folder.hidden ? "checked" : ""}> Hidden</label>
             <span class="spm-mini">${count} prompts</span>
             <button class="spm-btn spm-btn-danger" data-dialog-action="delete-folder" data-folder="${escapeHtml(folder.id)}">Delete</button>
           </div>`;
@@ -1245,7 +1265,7 @@ function enhanceNode(node) {
       const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
       if (action === "save-close") close();
       if (action === "add-folder") {
-        const folder = { id: makeId("folder"), name: "" };
+        const folder = { id: makeId("folder"), name: "", hidden: false };
         state.folders.push(folder);
         state.selectedFolderId = folder.id;
         saveWithoutRender();
@@ -1263,6 +1283,14 @@ function enhanceNode(node) {
         saveWithoutRender();
         renderFolders();
       }
+    });
+    modal.addEventListener("change", (event) => {
+      const folderId = event.target.dataset.dialogFolderHidden;
+      if (!folderId) return;
+      const folder = state.folders.find((item) => item.id === folderId);
+      if (!folder) return;
+      folder.hidden = event.target.checked;
+      saveWithoutRender();
     });
     modal.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && event.target.matches("[data-dialog-folder-name]")) {
@@ -1285,11 +1313,19 @@ function enhanceNode(node) {
     const folderOptions = allFolders
       .map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === state.selectedFolderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`)
       .join("");
+    const selectedPreviewHidden = isPreviewHidden(state, prompt);
+    const revealSelectedPreview = !selectedPreviewHidden || nodeHovering;
+    const previewPlaceholder = '<span class="spm-muted">Preview hidden. Hover over the node to reveal it.</span>';
+    const selectedTitle = revealSelectedPreview ? prompt?.title || "No prompt selected" : "Hidden prompt";
     const list = visiblePrompts()
       .map(
-        (item) => `<div class="spm-prompt-item ${item.id === state.selectedPromptId ? "is-selected" : ""}" data-prompt-id="${escapeHtml(item.id)}" title="${escapeHtml(promptHoverPreview(item))}">
-          <span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(item.title)}</span><span class="spm-mini">${escapeHtml(folderName(state, item.folderId))}</span>
-        </div>`,
+        (item) => {
+          const itemHidden = isPreviewHidden(state, item);
+          const revealItem = !itemHidden || nodeHovering;
+          return `<div class="spm-prompt-item ${item.id === state.selectedPromptId ? "is-selected" : ""}" data-prompt-id="${escapeHtml(item.id)}" title="${escapeHtml(revealItem ? promptHoverPreview(item) : "Hidden prompt. Hover over the node to reveal it.")}">
+            <span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(revealItem ? item.title : "Hidden prompt")}</span><span class="spm-mini">${revealItem ? escapeHtml(folderName(state, item.folderId)) : "hidden"}</span>
+          </div>`;
+        },
       )
       .join("");
     root.innerHTML = `
@@ -1309,20 +1345,21 @@ function enhanceNode(node) {
       </details>
       <details class="spm-section" open><summary>Selected Prompt</summary>
         <div class="spm-node-summary">
-          <div class="spm-node-summary-title">${escapeHtml(prompt?.title || "No prompt selected")}</div>
-          <div class="spm-mini">${escapeHtml(folderName(state, prompt?.folderId || ""))}${prompt?.tags?.length ? ` · ${escapeHtml(prompt.tags.join(", "))}` : ""}${prompt?.locked ? " · locked" : ""}</div>
-          ${prompt?.description ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
+          <div class="spm-node-summary-title">${escapeHtml(selectedTitle)}</div>
+          <div class="spm-mini">${revealSelectedPreview ? escapeHtml(folderName(state, prompt?.folderId || "")) : "hidden"}${revealSelectedPreview && prompt?.tags?.length ? ` · ${escapeHtml(prompt.tags.join(", "))}` : ""}${revealSelectedPreview && prompt?.locked ? " · locked" : ""}${selectedPreviewHidden ? " · hidden" : ""}</div>
+          ${prompt?.description && revealSelectedPreview ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
         </div>
         <div class="spm-row-wrap">
           <label><input type="checkbox" data-prompt-bool="favorite" ${prompt?.favorite ? "checked" : ""}> Favorite</label>
           <label><input type="checkbox" data-prompt-bool="locked" ${prompt?.locked ? "checked" : ""}> Locked</label>
+          <label><input type="checkbox" data-prompt-bool="hidden" ${prompt?.hidden ? "checked" : ""}> Hidden preview</label>
           <button class="spm-btn" data-action="copy-resolved">Copy resolved</button>
           <button class="spm-btn" data-action="copy-prompt-json">Copy prompt JSON</button>
         </div>
         <div class="spm-mini">Highlighted preview</div>
-        <div class="spm-preview">${renderPreview(prompt?.text || "", resolution)}</div>
+        <div class="spm-preview">${revealSelectedPreview ? renderPreview(prompt?.text || "", resolution) : previewPlaceholder}</div>
         <div class="spm-mini">Resolved preview</div>
-        <div class="spm-preview">${escapeHtml(resolution.resolved_prompt)}</div>
+        <div class="spm-preview">${revealSelectedPreview ? escapeHtml(resolution.resolved_prompt) : previewPlaceholder}</div>
       </details>
       <details class="spm-section"><summary>Import / Export</summary>
         <div class="spm-row-wrap">
@@ -1342,6 +1379,21 @@ function enhanceNode(node) {
       ensureMinimumNodeSize();
     }, 0);
   }
+
+  root.addEventListener("mouseenter", () => {
+    if (nodeHovering) return;
+    nodeHovering = true;
+    if (hasHiddenPreviews(state)) renderUi();
+  });
+  root.addEventListener("mouseleave", () => {
+    if (!nodeHovering) return;
+    nodeHovering = false;
+    if (tooltip) {
+      tooltip.remove();
+      tooltip = null;
+    }
+    if (hasHiddenPreviews(state)) renderUi();
+  });
 
   root.addEventListener("mouseover", (event) => {
     const target = event.target.closest?.(".spm-var");

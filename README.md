@@ -92,7 +92,7 @@ Repeated uses of the same variable in one prompt resolve to the same value. Miss
 
 ## Folders And Search
 
-Folders have stable IDs and editable names. Deleting a folder moves prompts to **Unsorted**.
+Folders have stable IDs and editable names. Deleting a folder moves prompts to **Unsorted**. Prompts and folders can also be marked hidden, which hides the selected prompt preview in the node until the mouse is hovering over the node.
 
 Virtual folders:
 
@@ -169,7 +169,7 @@ Library schema:
   "version": 1,
   "selectedFolderId": "all",
   "selectedPromptId": "prompt1",
-  "folders": [{ "id": "folder1", "name": "Portraits" }],
+  "folders": [{ "id": "folder1", "name": "Portraits", "hidden": false }],
   "prompts": [
     {
       "id": "prompt1",
@@ -180,6 +180,7 @@ Library schema:
       "description": "",
       "favorite": false,
       "locked": false,
+      "hidden": false,
       "createdAt": "2026-01-01T12:00:00Z",
       "updatedAt": "2026-01-01T12:00:00Z"
     }
