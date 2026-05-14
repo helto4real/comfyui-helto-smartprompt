@@ -1112,8 +1112,16 @@ function enhanceNode(node) {
 
     const close = (commit = false) => {
       autocomplete.open = false;
-      const tagsInput = modal.querySelector("[data-dialog-prompt-field='tags']");
-      if (tagsInput && !prompt.locked) prompt.tags = normalizeTags(tagsInput.value);
+      if (!prompt.locked) {
+        modal.querySelectorAll("[data-dialog-prompt-field]").forEach((fieldElement) => {
+          const field = fieldElement.dataset.dialogPromptField;
+          prompt[field] = field === "tags" ? normalizeTags(fieldElement.value) : fieldElement.value;
+        });
+        modal.querySelectorAll("[data-dialog-prompt-bool]").forEach((boolElement) => {
+          prompt[boolElement.dataset.dialogPromptBool] = boolElement.checked;
+        });
+        prompt.updatedAt = nowIso();
+      }
       backdrop.remove();
       if (commit) commitDraft();
       save();
