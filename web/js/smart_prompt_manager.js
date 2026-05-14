@@ -996,6 +996,9 @@ function enhanceNode(node) {
     renderVariables();
 
     const close = () => {
+      state.folders.forEach((folder) => {
+        if (!String(folder.name || "").trim()) folder.name = "Folder";
+      });
       backdrop.remove();
       save();
     };
@@ -1053,6 +1056,107 @@ function enhanceNode(node) {
     });
   }
 
+  function openFoldersDialog() {
+    const backdrop = createElement("div", "spm-modal-backdrop");
+    const modal = createElement("div", "spm-modal");
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    stopComfyShortcuts(backdrop);
+
+    const renderFolders = (focusFolderId = "") => {
+      const virtualRows = VIRTUAL_FOLDERS.map(
+        (folder) => `<div class="spm-prompt-item ${state.selectedFolderId === folder.id ? "is-selected" : ""}" data-dialog-folder-select="${escapeHtml(folder.id)}">
+          <span class="spm-prompt-title">${escapeHtml(folder.name)}</span><span class="spm-mini">virtual</span>
+        </div>`,
+      ).join("");
+      const folderRows = state.folders
+        .map((folder) => {
+          const count = state.prompts.filter((prompt) => prompt.folderId === folder.id).length;
+          return `<div class="spm-row" data-folder-row="${escapeHtml(folder.id)}">
+            <button class="spm-btn spm-btn-quiet" data-dialog-folder-select="${escapeHtml(folder.id)}">${state.selectedFolderId === folder.id ? "Selected" : "Select"}</button>
+            <input type="text" data-dialog-folder-name="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" style="flex:1">
+            <span class="spm-mini">${count} prompts</span>
+            <button class="spm-btn spm-btn-danger" data-dialog-action="delete-folder" data-folder="${escapeHtml(folder.id)}">Delete</button>
+          </div>`;
+        })
+        .join("");
+      modal.innerHTML = `
+        <div class="spm-modal-header">
+          <div class="spm-modal-title">Edit Folders</div>
+          <div class="spm-row-wrap">
+            <button class="spm-btn" data-dialog-action="add-folder">Add folder</button>
+            <button class="spm-btn" data-dialog-action="save-close">Done</button>
+          </div>
+        </div>
+        <div class="spm-mini">Filter folders</div>
+        <div class="spm-prompt-list" style="max-height:128px;margin-bottom:10px">${virtualRows}</div>
+        <div class="spm-mini">Editable folders</div>
+        ${folderRows || '<div class="spm-muted">No custom folders yet.</div>'}
+      `;
+      if (focusFolderId) {
+        const input = modal.querySelector(`[data-dialog-folder-name="${CSS.escape(focusFolderId)}"]`);
+        input?.focus();
+        input?.select?.();
+      }
+    };
+
+    const close = () => {
+      backdrop.remove();
+      save();
+    };
+
+    renderFolders();
+    modal.addEventListener("input", (event) => {
+      const folderId = event.target.dataset.dialogFolderName;
+      if (!folderId) return;
+      const folder = state.folders.find((item) => item.id === folderId);
+      if (!folder) return;
+      folder.name = event.target.value;
+      saveWithoutRender();
+    });
+    modal.addEventListener("click", (event) => {
+      const folderSelect = event.target.closest?.("[data-dialog-folder-select]");
+      if (folderSelect) {
+        state.selectedFolderId = folderSelect.dataset.dialogFolderSelect;
+        saveWithoutRender();
+        renderFolders();
+        return;
+      }
+      const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
+      if (action === "save-close") close();
+      if (action === "add-folder") {
+        const folder = { id: makeId("folder"), name: "" };
+        state.folders.push(folder);
+        state.selectedFolderId = folder.id;
+        saveWithoutRender();
+        renderFolders(folder.id);
+      }
+      if (action === "delete-folder") {
+        const folderId = event.target.dataset.folder;
+        const folder = state.folders.find((item) => item.id === folderId);
+        if (!folder || !confirm(`Delete folder "${folder.name}"? Prompts will move to Unsorted.`)) return;
+        state.prompts.forEach((prompt) => {
+          if (prompt.folderId === folder.id) prompt.folderId = "";
+        });
+        state.folders = state.folders.filter((item) => item.id !== folder.id);
+        if (state.selectedFolderId === folder.id) state.selectedFolderId = "all";
+        saveWithoutRender();
+        renderFolders();
+      }
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.matches("[data-dialog-folder-name]")) {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    });
+  }
+
   function renderUi() {
     const prompt = selectedPrompt(state);
     const resolution = currentResolution(prompt);
@@ -1071,6 +1175,7 @@ function enhanceNode(node) {
     root.innerHTML = `
       <div class="spm-row-wrap">
         <button class="spm-btn" data-action="open-prompt-editor">Edit prompts</button>
+        <button class="spm-btn" data-action="open-folders-editor">Edit folders</button>
         <button class="spm-btn" data-action="open-variables-editor">Edit variables</button>
         <button class="spm-btn" data-action="reroll">Reroll</button>
         <span class="spm-muted">${escapeHtml(status)}</span>
@@ -1079,11 +1184,6 @@ function enhanceNode(node) {
         <div class="spm-row">
           <select data-field="selectedFolderId">${folderOptions}</select>
           <input type="text" data-field="search" value="${escapeHtml(state.search)}" placeholder="Search">
-        </div>
-        <div class="spm-row-wrap">
-          <button class="spm-btn spm-btn-quiet" data-action="add-folder">Add folder</button>
-          <button class="spm-btn spm-btn-quiet" data-action="rename-folder">Rename</button>
-          <button class="spm-btn spm-btn-danger" data-action="delete-folder">Delete folder</button>
         </div>
         <div class="spm-prompt-list">${list || '<div class="spm-muted" style="padding:6px">No prompts match.</div>'}</div>
       </details>
@@ -1166,22 +1266,12 @@ function enhanceNode(node) {
       } else if (action === "open-prompt-editor") {
         openPromptDialog();
         return;
+      } else if (action === "open-folders-editor") {
+        openFoldersDialog();
+        return;
       } else if (action === "open-variables-editor") {
         openVariablesDialog();
         return;
-      } else if (action === "add-folder") {
-        const name = window.prompt("Folder name", "New folder");
-        if (name) state.folders.push({ id: makeId("folder"), name: name.trim() || "New folder" });
-      } else if (action === "rename-folder") {
-        const folder = state.folders.find((item) => item.id === state.selectedFolderId);
-        if (folder) folder.name = window.prompt("Folder name", folder.name) || folder.name;
-      } else if (action === "delete-folder") {
-        const folder = state.folders.find((item) => item.id === state.selectedFolderId);
-        if (folder && confirm(`Delete folder "${folder.name}"? Prompts will move to Unsorted.`)) {
-          state.prompts.forEach((item) => { if (item.folderId === folder.id) item.folderId = ""; });
-          state.folders = state.folders.filter((item) => item.id !== folder.id);
-          state.selectedFolderId = "all";
-        }
       } else if (action === "add-variable") {
         let name = "variable";
         let index = 2;
