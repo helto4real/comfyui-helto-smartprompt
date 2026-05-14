@@ -725,72 +725,105 @@ function enhanceNode(node) {
     renderAutocompleteInto(popup);
   }
 
-  function openPromptDialog(options = {}) {
-    const isDraft = Boolean(options.draftPrompt);
-    const prompt = options.draftPrompt || selectedPrompt(state);
-    if (!prompt) return;
+  function openPromptDialog() {
+    let prompt = selectedPrompt(state);
+    if (!prompt && state.prompts.length) prompt = state.prompts[0];
+    if (!prompt) {
+      const created = nowIso();
+      prompt = {
+        id: makeId("prompt"),
+        title: "Untitled prompt",
+        text: "",
+        description: "",
+        folderId: "",
+        tags: [],
+        favorite: false,
+        locked: false,
+        createdAt: created,
+        updatedAt: created,
+      };
+    }
+    let isDraft = !state.prompts.some((item) => item.id === prompt.id);
     const backdrop = createElement("div", "spm-modal-backdrop");
     const modal = createElement("div", "spm-modal");
-    const resolution = currentResolution(prompt);
-    const folderOptions = [`<option value="">Unsorted</option>`]
-      .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
-      .join("");
-    modal.innerHTML = `
-      <div class="spm-modal-header">
-        <div class="spm-modal-title">${isDraft ? "Add Prompt" : "Edit Prompt"}</div>
-        <div class="spm-row-wrap">
-          <button class="spm-btn" data-dialog-action="save-close">Done</button>
-          <button class="spm-btn spm-btn-quiet" data-dialog-action="close">Close</button>
-        </div>
-      </div>
-      <div class="spm-row">
-        <div class="spm-modal-field"><label>Title</label><input type="text" data-dialog-prompt-field="title" value="${escapeHtml(prompt.title || "")}" ${prompt.locked ? "disabled" : ""}></div>
-        <div class="spm-modal-field"><label>Folder</label><select data-dialog-prompt-field="folderId" ${prompt.locked ? "disabled" : ""}>${folderOptions}</select></div>
-        <div class="spm-modal-field"><label>Tags</label><input type="text" data-dialog-prompt-field="tags" value="${escapeHtml(tagsForInput(prompt.tags))}" placeholder="portrait, cinematic" ${prompt.locked ? "disabled" : ""}></div>
-      </div>
-      <div class="spm-row-wrap">
-        <label><input type="checkbox" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
-        <label><input type="checkbox" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
-      </div>
-      <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
-      <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
-      <div class="spm-row-wrap">
-        <button class="spm-btn" data-dialog-action="copy-resolved">Copy resolved</button>
-        <button class="spm-btn" data-dialog-action="copy-prompt-json">Copy prompt JSON</button>
-      </div>
-      <div class="spm-mini">Highlighted preview</div>
-      <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "", resolution)}</div>
-      <div class="spm-mini">Resolved preview</div>
-      <div class="spm-preview" data-dialog-resolved>${escapeHtml(resolution.resolved_prompt)}</div>
-    `;
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
     stopComfyShortcuts(backdrop);
 
-    const editor = modal.querySelector(".spm-dialog-editor");
-    const popup = modal.querySelector("[data-dialog-autocomplete]");
+    const commitDraft = () => {
+      if (!isDraft) return;
+      const existingNames = state.prompts.map((item) => item.title);
+      if (state.prompts.some((item) => item.title.toLowerCase() === prompt.title.toLowerCase())) {
+        prompt.title = suffixName(prompt.title, existingNames);
+      }
+      state.prompts.push(prompt);
+      state.selectedPromptId = prompt.id;
+      isDraft = false;
+    };
+
     const updatePreview = () => {
       const nextResolution = currentResolution(prompt);
       modal.querySelector("[data-dialog-highlight]").innerHTML = renderPreview(prompt.text || "", nextResolution);
       modal.querySelector("[data-dialog-resolved]").textContent = nextResolution.resolved_prompt;
     };
+
+    const renderPromptDialog = () => {
+      const resolution = currentResolution(prompt);
+      const folderOptions = [`<option value="">Unsorted</option>`]
+        .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
+        .join("");
+      const promptList = state.prompts
+        .map((item) => `<div class="spm-prompt-item ${item.id === prompt.id && !isDraft ? "is-selected" : ""}" data-dialog-prompt-id="${escapeHtml(item.id)}"><span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(item.title)}</span><span class="spm-mini">${escapeHtml(folderName(state, item.folderId))}</span></div>`)
+        .join("");
+      modal.innerHTML = `
+        <div class="spm-modal-header">
+          <div class="spm-modal-title">Edit Prompts${isDraft ? " · new draft" : ""}</div>
+          <div class="spm-row-wrap">
+            <button class="spm-btn" data-dialog-action="save-close">Done</button>
+            <button class="spm-btn spm-btn-quiet" data-dialog-action="close">Close</button>
+          </div>
+        </div>
+        <div class="spm-row" style="align-items:stretch">
+          <div style="width:260px;min-width:220px">
+            <div class="spm-row-wrap">
+              <button class="spm-btn" data-dialog-action="add-prompt">Add</button>
+              <button class="spm-btn" data-dialog-action="duplicate-prompt">Duplicate</button>
+              <button class="spm-btn spm-btn-danger" data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}>Delete</button>
+            </div>
+            <div class="spm-prompt-list" style="max-height:520px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title)}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No saved prompts.</div>'}</div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div class="spm-row">
+              <div class="spm-modal-field"><label>Title</label><input type="text" data-dialog-prompt-field="title" value="${escapeHtml(prompt.title || "")}" ${prompt.locked ? "disabled" : ""}></div>
+              <div class="spm-modal-field"><label>Folder</label><select data-dialog-prompt-field="folderId" ${prompt.locked ? "disabled" : ""}>${folderOptions}</select></div>
+              <div class="spm-modal-field"><label>Tags</label><input type="text" data-dialog-prompt-field="tags" value="${escapeHtml(tagsForInput(prompt.tags))}" placeholder="portrait, cinematic" ${prompt.locked ? "disabled" : ""}></div>
+            </div>
+            <div class="spm-row-wrap">
+              <label><input type="checkbox" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
+              <label><input type="checkbox" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
+            </div>
+            <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
+            <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
+            <div class="spm-row-wrap">
+              <button class="spm-btn" data-dialog-action="copy-resolved">Copy resolved</button>
+              <button class="spm-btn" data-dialog-action="copy-prompt-json">Copy prompt JSON</button>
+            </div>
+            <div class="spm-mini">Highlighted preview</div>
+            <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "", resolution)}</div>
+            <div class="spm-mini">Resolved preview</div>
+            <div class="spm-preview" data-dialog-resolved>${escapeHtml(resolution.resolved_prompt)}</div>
+          </div>
+        </div>
+      `;
+      modal.querySelector("[data-dialog-prompt-field='title']")?.focus();
+    };
+
     const close = (commit = false) => {
       autocomplete.open = false;
       const tagsInput = modal.querySelector("[data-dialog-prompt-field='tags']");
       if (tagsInput && !prompt.locked) prompt.tags = normalizeTags(tagsInput.value);
       backdrop.remove();
-      if (isDraft) {
-        if (commit) {
-          const existingNames = state.prompts.map((item) => item.title);
-          if (state.prompts.some((item) => item.title.toLowerCase() === prompt.title.toLowerCase())) {
-            prompt.title = suffixName(prompt.title, existingNames);
-          }
-          state.prompts.push(prompt);
-          state.selectedPromptId = prompt.id;
-          save();
-        }
-        return;
-      }
+      if (commit) commitDraft();
       save();
     };
 
@@ -801,7 +834,7 @@ function enhanceNode(node) {
       prompt.updatedAt = nowIso();
       if (field === "text") {
         updateAutocomplete(event.target);
-        renderAutocompleteInto(popup);
+        renderAutocompleteInto(modal.querySelector("[data-dialog-autocomplete]"));
         updatePreview();
       }
       if (!isDraft) saveWithoutRender();
@@ -825,12 +858,44 @@ function enhanceNode(node) {
       const suggestion = event.target.closest?.("[data-suggest]");
       if (suggestion) {
         autocomplete.active = autocomplete.items.indexOf(suggestion.dataset.suggest);
-        acceptAutocompleteInPromptDialog(editor, popup, updatePreview, prompt, !isDraft);
+        acceptAutocompleteInPromptDialog(modal.querySelector(".spm-dialog-editor"), modal.querySelector("[data-dialog-autocomplete]"), updatePreview, prompt, !isDraft);
+        return;
+      }
+      const promptItem = event.target.closest?.("[data-dialog-prompt-id]");
+      if (promptItem) {
+        if (isDraft && !confirm("Discard the unsaved draft prompt?")) return;
+        prompt = state.prompts.find((item) => item.id === promptItem.dataset.dialogPromptId) || prompt;
+        state.selectedPromptId = prompt.id;
+        isDraft = false;
+        saveWithoutRender();
+        renderPromptDialog();
         return;
       }
       const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
       if (action === "close") close(false);
       if (action === "save-close") close(true);
+      if (action === "add-prompt") {
+        const created = nowIso();
+        prompt = { id: makeId("prompt"), title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, createdAt: created, updatedAt: created };
+        isDraft = true;
+        autocomplete.open = false;
+        renderPromptDialog();
+      }
+      if (action === "duplicate-prompt") {
+        const created = nowIso();
+        prompt = { ...prompt, id: makeId("prompt"), title: suffixName(prompt.title, state.prompts.map((item) => item.title)), locked: false, createdAt: created, updatedAt: created };
+        isDraft = true;
+        autocomplete.open = false;
+        renderPromptDialog();
+      }
+      if (action === "delete-prompt" && !isDraft && confirm(`Delete prompt "${prompt.title}"?`)) {
+        state.prompts = state.prompts.filter((item) => item.id !== prompt.id);
+        prompt = state.prompts[0] || { id: makeId("prompt"), title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, createdAt: nowIso(), updatedAt: nowIso() };
+        isDraft = !state.prompts.length;
+        state.selectedPromptId = isDraft ? "" : prompt.id;
+        saveWithoutRender();
+        renderPromptDialog();
+      }
       if (action === "copy-resolved") await copyText(currentResolution(prompt).resolved_prompt, "[data-role='json-box']");
       if (action === "copy-prompt-json") await copyText(promptJson(prompt), "[data-role='json-box']");
     });
@@ -861,10 +926,10 @@ function enhanceNode(node) {
       }
       if (event.ctrlKey && autocomplete.open && event.key.toLowerCase() === KEYS.accept) {
         event.preventDefault();
-        acceptAutocompleteInPromptDialog(editor, popup, updatePreview, prompt, !isDraft);
+        acceptAutocompleteInPromptDialog(modal.querySelector(".spm-dialog-editor"), modal.querySelector("[data-dialog-autocomplete]"), updatePreview, prompt, !isDraft);
       }
     });
-    modal.querySelector("[data-dialog-prompt-field='title']")?.focus();
+    renderPromptDialog();
   }
 
   function openVariablesDialog() {
@@ -976,14 +1041,10 @@ function enhanceNode(node) {
         </div>`,
       )
       .join("");
-    const usedVariables = prompt ? variablesUsed(prompt.text || "") : [];
-    const variableSummary = Object.keys(state.variables).sort((a, b) => a.localeCompare(b));
-
     root.innerHTML = `
       <div class="spm-row-wrap">
-        <button class="spm-btn" data-action="add-prompt">Add</button>
-        <button class="spm-btn" data-action="duplicate-prompt" ${!prompt ? "disabled" : ""}>Duplicate</button>
-        <button class="spm-btn spm-btn-danger" data-action="delete-prompt" ${!prompt ? "disabled" : ""}>Delete</button>
+        <button class="spm-btn" data-action="open-prompt-editor">Edit prompts</button>
+        <button class="spm-btn" data-action="open-variables-editor">Edit variables</button>
         <button class="spm-btn" data-action="reroll">Reroll</button>
         <span class="spm-muted">${escapeHtml(status)}</span>
       </div>
@@ -1006,7 +1067,6 @@ function enhanceNode(node) {
           ${prompt?.description ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
         </div>
         <div class="spm-row-wrap">
-          <button class="spm-btn" data-action="open-prompt-editor" ${!prompt ? "disabled" : ""}>Edit prompt</button>
           <label><input type="checkbox" data-prompt-bool="favorite" ${prompt?.favorite ? "checked" : ""}> Favorite</label>
           <label><input type="checkbox" data-prompt-bool="locked" ${prompt?.locked ? "checked" : ""}> Locked</label>
           <button class="spm-btn" data-action="copy-resolved">Copy resolved</button>
@@ -1016,13 +1076,6 @@ function enhanceNode(node) {
         <div class="spm-preview">${renderPreview(prompt?.text || "", resolution)}</div>
         <div class="spm-mini">Resolved preview</div>
         <div class="spm-preview">${escapeHtml(resolution.resolved_prompt)}</div>
-      </details>
-      <details class="spm-section"><summary>Variables</summary>
-        <div class="spm-node-summary">
-          <div>${variableSummary.length ? escapeHtml(variableSummary.join(", ")) : '<span class="spm-muted">No variables defined.</span>'}</div>
-          <div class="spm-mini">Used by selected prompt: ${usedVariables.length ? escapeHtml(usedVariables.join(", ")) : "none"}</div>
-        </div>
-        <button class="spm-btn" data-action="open-variables-editor">Edit variables</button>
       </details>
       <details class="spm-section"><summary>Import / Export</summary>
         <div class="spm-row-wrap">
@@ -1080,34 +1133,8 @@ function enhanceNode(node) {
     }
     const action = event.target.closest?.("[data-action]")?.dataset.action;
     if (!action) return;
-    const currentPrompt = selectedPrompt(state);
     try {
-      if (action === "add-prompt") {
-        const created = nowIso();
-        const id = makeId("prompt");
-        openPromptDialog({
-          draftPrompt: {
-            id,
-            title: "Untitled prompt",
-            text: "",
-            description: "",
-            folderId: state.selectedFolderId && !VIRTUAL_FOLDERS.some((folder) => folder.id === state.selectedFolderId) ? state.selectedFolderId : "",
-            tags: [],
-            favorite: false,
-            locked: false,
-            createdAt: created,
-            updatedAt: created,
-          },
-        });
-        return;
-      } else if (action === "duplicate-prompt" && currentPrompt) {
-        const copy = { ...currentPrompt, id: makeId("prompt"), title: suffixName(currentPrompt.title, state.prompts.map((item) => item.title)), locked: false, createdAt: nowIso(), updatedAt: nowIso() };
-        state.prompts.push(copy);
-        state.selectedPromptId = copy.id;
-      } else if (action === "delete-prompt" && currentPrompt && confirm(`Delete prompt "${currentPrompt.title}"?`)) {
-        state.prompts = state.prompts.filter((item) => item.id !== currentPrompt.id);
-        state.selectedPromptId = state.prompts[0]?.id || "";
-      } else if (action === "reroll") {
+      if (action === "reroll") {
         if (rerollWidget) rerollWidget.value = (Number.parseInt(rerollWidget.value || 0, 10) || 0) + 1;
       } else if (action === "open-prompt-editor") {
         openPromptDialog();
