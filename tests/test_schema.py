@@ -51,6 +51,22 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(state["folders"][0]["hidden"])
         self.assertTrue(state["prompts"][0]["hidden"])
 
+    def test_long_prompt_title_is_preserved(self):
+        title = "A very long prompt title with spaces, punctuation, and enough text to overflow compact prompt list rows"
+        state, warnings = normalize_state(
+            {
+                "prompts": [
+                    {
+                        "id": "prompt1",
+                        "title": title,
+                        "text": "body",
+                    }
+                ]
+            }
+        )
+        self.assertFalse(warnings)
+        self.assertEqual(state["prompts"][0]["title"], title)
+
     def test_merge_avoids_folder_prompt_and_variable_conflicts(self):
         current = {
             "version": 1,

@@ -493,7 +493,7 @@ function injectStyles() {
     .spm-modal textarea{width:100%;resize:vertical}.spm-dialog-editor{min-height:220px}.spm-dialog-description{min-height:70px}
     .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:7px 0}.spm-modal .spm-preview{max-height:170px}.spm-modal-field{display:flex;flex-direction:column;gap:4px;flex:1}.spm-modal-field label{font-size:11px;color:var(--spm-muted,#c8c8c8)}
     .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:5px;align-items:start}.spm-modal-grid textarea{min-height:54px}
-    .spm-node-summary{background:var(--spm-field-bg,#202020);border:1px solid var(--spm-border,#555);border-radius:4px;padding:6px;line-height:1.35}.spm-node-summary-title{font-weight:700;color:var(--spm-text,#f5f5f5)}
+    .spm-node-summary{background:var(--spm-field-bg,#202020);border:1px solid var(--spm-border,#555);border-radius:4px;padding:6px;line-height:1.35}.spm-node-summary-title{font-weight:700;color:var(--spm-text,#f5f5f5);overflow-wrap:anywhere}
   `;
   document.head.appendChild(style);
 }
@@ -794,7 +794,7 @@ function enhanceNode(node) {
     const variableLines = used
       .map((name) => `${name}: ${normalizeValues(state.variables[name]?.values).join(", ") || "undefined"}`)
       .join("\n");
-    return `${prompt.text}\n\nVariables:\n${variableLines || "none"}\n\nResolved:\n${resolution.resolved_prompt}\n${resolution.warnings.length ? `\nWarnings:\n${resolution.warnings.join("\n")}` : ""}`;
+    return `${prompt.title || "Untitled prompt"}\n\n${prompt.text}\n\nVariables:\n${variableLines || "none"}\n\nResolved:\n${resolution.resolved_prompt}\n${resolution.warnings.length ? `\nWarnings:\n${resolution.warnings.join("\n")}` : ""}`;
   }
 
   async function copyText(text, fallbackSelector) {
@@ -1515,7 +1515,7 @@ function enhanceNode(node) {
       </details>
       <details class="spm-section" open><summary>Selected Prompt</summary>
         <div class="spm-node-summary">
-          <div class="spm-node-summary-title">${escapeHtml(selectedTitle)}</div>
+          <div class="spm-node-summary-title" title="${escapeHtml(selectedTitle)}">${escapeHtml(selectedTitle)}</div>
           <div class="spm-mini">${revealSelectedPreview ? escapeHtml(folderName(state, prompt?.folderId || "")) : "hidden"}${revealSelectedPreview && prompt?.tags?.length ? ` · ${escapeHtml(prompt.tags.join(", "))}` : ""}${revealSelectedPreview && prompt?.locked ? " · locked" : ""}${selectedPreviewHidden ? " · hidden" : ""}</div>
           ${prompt?.description && revealSelectedPreview ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
         </div>
