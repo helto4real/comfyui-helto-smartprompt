@@ -749,6 +749,7 @@ function enhanceNode(node) {
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
     stopComfyShortcuts(backdrop);
+    let dialogSearch = "";
 
     const commitDraft = () => {
       if (!isDraft) return;
@@ -767,12 +768,26 @@ function enhanceNode(node) {
       modal.querySelector("[data-dialog-resolved]").textContent = nextResolution.resolved_prompt;
     };
 
-    const renderPromptDialog = () => {
+    const renderPromptDialog = (focus = {}) => {
       const resolution = currentResolution(prompt);
+      const query = dialogSearch.trim().toLowerCase();
       const folderOptions = [`<option value="">Unsorted</option>`]
         .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
         .join("");
       const promptList = state.prompts
+        .filter((item) => {
+          if (!query) return true;
+          const haystack = [
+            item.title,
+            item.text,
+            item.description,
+            Array.isArray(item.tags) ? item.tags.join(" ") : String(item.tags || ""),
+            folderName(state, item.folderId),
+          ]
+            .join(" ")
+            .toLowerCase();
+          return haystack.includes(query);
+        })
         .map((item) => `<div class="spm-prompt-item ${item.id === prompt.id && !isDraft ? "is-selected" : ""}" data-dialog-prompt-id="${escapeHtml(item.id)}"><span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(item.title)}</span><span class="spm-mini">${escapeHtml(folderName(state, item.folderId))}</span></div>`)
         .join("");
       modal.innerHTML = `
@@ -790,7 +805,8 @@ function enhanceNode(node) {
               <button class="spm-btn" data-dialog-action="duplicate-prompt">Duplicate</button>
               <button class="spm-btn spm-btn-danger" data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}>Delete</button>
             </div>
-            <div class="spm-prompt-list" style="max-height:520px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title)}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No saved prompts.</div>'}</div>
+            <input type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts" style="width:100%;margin:4px 0 6px">
+            <div class="spm-prompt-list" style="max-height:486px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title)}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
           </div>
           <div style="flex:1;min-width:0">
             <div class="spm-row">
@@ -815,7 +831,12 @@ function enhanceNode(node) {
           </div>
         </div>
       `;
-      modal.querySelector("[data-dialog-prompt-field='title']")?.focus();
+      const target = focus.selector ? modal.querySelector(focus.selector) : modal.querySelector("[data-dialog-prompt-field='title']");
+      target?.focus();
+      if (focus.cursor !== undefined && typeof target?.setSelectionRange === "function") {
+        const cursor = Math.min(focus.cursor, String(target.value || "").length);
+        target.setSelectionRange(cursor, cursor);
+      }
     };
 
     const close = (commit = false) => {
@@ -828,6 +849,12 @@ function enhanceNode(node) {
     };
 
     modal.addEventListener("input", (event) => {
+      if (event.target.matches("[data-dialog-search]")) {
+        const cursor = event.target.selectionStart;
+        dialogSearch = event.target.value;
+        renderPromptDialog({ selector: "[data-dialog-search]", cursor });
+        return;
+      }
       if (!event.target.dataset.dialogPromptField || prompt.locked) return;
       const field = event.target.dataset.dialogPromptField;
       prompt[field] = field === "tags" ? tagsFromDraft(event.target.value) : event.target.value;
