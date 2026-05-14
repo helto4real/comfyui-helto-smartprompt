@@ -909,7 +909,7 @@ function enhanceNode(node) {
             .toLowerCase();
           return haystack.includes(query);
         })
-        .map((item) => `<div class="spm-prompt-item ${item.id === prompt.id && !isDraft ? "is-selected" : ""}" data-dialog-prompt-id="${escapeHtml(item.id)}"><span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(item.title)}</span><span class="spm-mini">${escapeHtml(folderName(state, item.folderId))}</span></div>`)
+        .map((item) => `<div class="spm-prompt-item ${item.id === prompt.id && !isDraft ? "is-selected" : ""}" data-dialog-prompt-id="${escapeHtml(item.id)}" title="${escapeHtml(promptHoverPreview(item))}"><span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(item.title)}</span><span class="spm-mini">${escapeHtml(folderName(state, item.folderId))}</span></div>`)
         .join("");
       modal.innerHTML = `
         <div class="spm-modal-header">
@@ -928,7 +928,7 @@ function enhanceNode(node) {
             </div>
             <select data-dialog-folder-filter style="width:100%;margin:4px 0 6px">${filterOptions}</select>
             <input type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts" style="width:100%;margin:4px 0 6px">
-            <div class="spm-prompt-list" style="max-height:446px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title || "Untitled prompt")}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
+            <div class="spm-prompt-list" style="max-height:446px">${isDraft ? `<div class="spm-prompt-item is-selected" title="${escapeHtml(promptHoverPreview(prompt))}"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title || "Untitled prompt")}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
           </div>
           <div style="flex:1;min-width:0">
             <div class="spm-row">
