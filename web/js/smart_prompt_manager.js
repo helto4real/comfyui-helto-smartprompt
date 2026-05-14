@@ -915,6 +915,8 @@ function enhanceNode(node) {
           <div style="flex:1;min-width:0">
             <div class="spm-row">
               <div class="spm-modal-field"><label>Title</label><input type="text" data-dialog-prompt-field="title" value="${escapeHtml(prompt.title || "")}" ${prompt.locked ? "disabled" : ""}></div>
+            </div>
+            <div class="spm-row">
               <div class="spm-modal-field"><label>Folder</label><select data-dialog-prompt-field="folderId" ${prompt.locked ? "disabled" : ""}>${folderOptions}</select></div>
               <div class="spm-modal-field"><label>Tags</label><input type="text" data-dialog-prompt-field="tags" value="${escapeHtml(tagsForInput(prompt.tags))}" placeholder="portrait, cinematic" ${prompt.locked ? "disabled" : ""}></div>
             </div>
