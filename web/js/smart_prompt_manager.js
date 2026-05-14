@@ -750,9 +750,11 @@ function enhanceNode(node) {
     document.body.appendChild(backdrop);
     stopComfyShortcuts(backdrop);
     let dialogSearch = "";
+    let dialogFolderFilter = state.selectedFolderId || "all";
 
     const commitDraft = () => {
       if (!isDraft) return;
+      if (!String(prompt.title || "").trim()) prompt.title = "Untitled prompt";
       const existingNames = state.prompts.map((item) => item.title);
       if (state.prompts.some((item) => item.title.toLowerCase() === prompt.title.toLowerCase())) {
         prompt.title = suffixName(prompt.title, existingNames);
@@ -771,11 +773,20 @@ function enhanceNode(node) {
     const renderPromptDialog = (focus = {}) => {
       const resolution = currentResolution(prompt);
       const query = dialogSearch.trim().toLowerCase();
+      const filterOptions = [...VIRTUAL_FOLDERS, ...state.folders]
+        .map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === dialogFolderFilter ? "selected" : ""}>${escapeHtml(folder.name)}</option>`)
+        .join("");
       const folderOptions = [`<option value="">Unsorted</option>`]
         .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
         .join("");
       const promptList = state.prompts
         .filter((item) => {
+          const inFolder =
+            dialogFolderFilter === "all" ||
+            (dialogFolderFilter === "unsorted" && !item.folderId) ||
+            (dialogFolderFilter === "favorites" && item.favorite) ||
+            item.folderId === dialogFolderFilter;
+          if (!inFolder) return false;
           if (!query) return true;
           const haystack = [
             item.title,
@@ -805,8 +816,9 @@ function enhanceNode(node) {
               <button class="spm-btn" data-dialog-action="duplicate-prompt">Duplicate</button>
               <button class="spm-btn spm-btn-danger" data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}>Delete</button>
             </div>
+            <select data-dialog-folder-filter style="width:100%;margin:4px 0 6px">${filterOptions}</select>
             <input type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts" style="width:100%;margin:4px 0 6px">
-            <div class="spm-prompt-list" style="max-height:486px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title)}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
+            <div class="spm-prompt-list" style="max-height:446px">${isDraft ? `<div class="spm-prompt-item is-selected"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title || "Untitled prompt")}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
           </div>
           <div style="flex:1;min-width:0">
             <div class="spm-row">
@@ -836,6 +848,8 @@ function enhanceNode(node) {
       if (focus.cursor !== undefined && typeof target?.setSelectionRange === "function") {
         const cursor = Math.min(focus.cursor, String(target.value || "").length);
         target.setSelectionRange(cursor, cursor);
+      } else if (focus.select && typeof target?.select === "function") {
+        target.select();
       }
     };
 
@@ -867,6 +881,11 @@ function enhanceNode(node) {
       if (!isDraft) saveWithoutRender();
     });
     modal.addEventListener("change", (event) => {
+      if (event.target.matches("[data-dialog-folder-filter]")) {
+        dialogFolderFilter = event.target.value;
+        renderPromptDialog({ selector: "[data-dialog-folder-filter]" });
+        return;
+      }
       if (event.target.dataset.dialogPromptField && !prompt.locked) {
         const field = event.target.dataset.dialogPromptField;
         prompt[field] = field === "tags" ? normalizeTags(event.target.value) : event.target.value;
@@ -903,10 +922,15 @@ function enhanceNode(node) {
       if (action === "save-close") close(true);
       if (action === "add-prompt") {
         const created = nowIso();
-        prompt = { id: makeId("prompt"), title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, createdAt: created, updatedAt: created };
+        const folderId = state.folders.some((folder) => folder.id === dialogFolderFilter)
+          ? dialogFolderFilter
+          : dialogFolderFilter === "unsorted"
+            ? ""
+            : "";
+        prompt = { id: makeId("prompt"), title: "", text: "", description: "", folderId, tags: [], favorite: false, locked: false, createdAt: created, updatedAt: created };
         isDraft = true;
         autocomplete.open = false;
-        renderPromptDialog();
+        renderPromptDialog({ selector: "[data-dialog-prompt-field='title']", select: true });
       }
       if (action === "duplicate-prompt") {
         const created = nowIso();
