@@ -10,7 +10,7 @@ Clone or copy this repository into your ComfyUI `custom_nodes` directory:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone <this-repository-url> comfyui-helto-prompts
+git clone https://github.com/helto4real/comfyui-helto-smartprompt comfyui-helto-smartprompt
 ```
 
 Restart ComfyUI. The node appears under:
