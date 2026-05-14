@@ -473,6 +473,7 @@ function injectStyles() {
     .spm-btn{background:var(--spm-button-bg,#3a3a3a);color:var(--spm-text,#f5f5f5);border:1px solid var(--spm-border,#666);border-radius:4px;padding:0;cursor:pointer;font:12px system-ui, sans-serif;white-space:nowrap;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center}
     .spm-btn:hover{background:var(--spm-hover-bg,#494949)}.spm-btn-danger{border-color:#8b4a4a;color:#ffdada}.spm-btn-quiet{background:var(--spm-field-bg,#303030);color:var(--spm-muted,#dddddd)}
     .spm-icon{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:block}.spm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    .spm-toolbar{min-height:28px}.spm-privacy-toggle{height:26px;display:inline-flex;align-items:center;gap:6px;margin:0 2px;color:var(--spm-text,#f5f5f5);line-height:1}.spm-privacy-toggle input[type=checkbox]{width:18px;height:18px;margin:0;padding:0;flex:0 0 auto}.spm-privacy-toggle span{white-space:nowrap}
     .spm-section{border-top:1px solid var(--spm-border,rgba(255,255,255,.14));margin-top:8px;padding-top:7px}.spm-section summary{cursor:pointer;font-weight:700;color:var(--spm-text,#f4f4f4)}
     .spm-prompt-list{max-height:92px;overflow:auto;border:1px solid var(--spm-border,#565656);border-radius:4px;background:var(--spm-list-bg,#242424)}
     .spm-prompt-item{display:flex;align-items:center;gap:5px;padding:4px 6px;border-bottom:1px solid var(--spm-soft-border,#333);cursor:pointer}
@@ -1490,13 +1491,12 @@ function enhanceNode(node) {
       )
       .join("");
     root.innerHTML = `
-      <div class="spm-row-wrap">
+      <div class="spm-row-wrap spm-toolbar">
         ${iconButton("prompts", "Edit prompts", 'data-action="open-prompt-editor"')}
         ${iconButton("folder", "Edit folders", 'data-action="open-folders-editor"')}
         ${iconButton("variable", "Edit variables", 'data-action="open-variables-editor"')}
         ${iconButton("reroll", "Reroll variables", 'data-action="reroll"')}
-        <label title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" title="Encrypt prompt library JSON in saved workflows" data-privacy-mode ${state.privacyMode ? "checked" : ""} ${privacyBusy ? "disabled" : ""}> Privacy mode</label>
-        <span class="spm-muted">${escapeHtml(status)}</span>
+        <label class="spm-privacy-toggle" title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" aria-label="Privacy mode" title="Encrypt prompt library JSON in saved workflows" data-privacy-mode ${state.privacyMode ? "checked" : ""} ${privacyBusy ? "disabled" : ""}><span>Privacy mode</span></label>
       </div>
       <details class="spm-section" open><summary>Prompt Library</summary>
         <div class="spm-row">
