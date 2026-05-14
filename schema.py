@@ -36,6 +36,7 @@ def default_state() -> Dict[str, Any]:
         "selectedFolderId": "all",
         "selectedPromptId": prompt_id,
         "search": "",
+        "privacyMode": False,
         "folders": [{"id": folder_id, "name": "Portraits", "hidden": False}],
         "prompts": [
             {
@@ -258,6 +259,7 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
         "selectedFolderId": selected_folder,
         "selectedPromptId": selected_prompt,
         "search": _as_text(data.get("search")),
+        "privacyMode": _as_bool(data.get("privacyMode")),
         "folders": folders,
         "prompts": prompts,
         "variables": variables,

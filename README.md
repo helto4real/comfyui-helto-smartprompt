@@ -41,7 +41,7 @@ The top row uses icon buttons. Hover an icon to see its tooltip:
 - edit variables
 - reroll variables
 
-Checkboxes also have tooltips. The visible labels are kept for readability, while the tooltip gives the exact behavior.
+The top row also includes **Privacy mode**. Checkboxes have tooltips; the visible labels are kept for readability, while the tooltip gives the exact behavior.
 
 ## Creating And Editing Prompts
 
@@ -149,6 +149,22 @@ When a prompt is hidden, or when it belongs to a hidden folder, the main node ma
 
 Hover over the node to reveal the hidden information. The prompt editor popup still shows the prompt normally because opening it is an explicit edit action.
 
+## Privacy Mode
+
+Hidden previews only affect what is visible on screen. **Privacy mode** protects saved workflow JSON by encrypting the node's prompt library before it is stored in `spm_data`.
+
+When Privacy mode is enabled:
+
+- the node creates `config/privacy_key.json` on first use
+- `config/` is ignored by git
+- prompt library data is stored in the workflow as an AES-256-GCM encrypted envelope
+- workflow reload decrypts the library through the local ComfyUI backend
+- the key is never written into the workflow, exports, copy/paste JSON, or README examples
+
+Back up `config/privacy_key.json` privately. If that file is lost, encrypted workflows cannot be decrypted. If an encrypted workflow is opened without the matching key, the node shows a locked error state and avoids overwriting the encrypted data.
+
+Privacy mode protects against accidentally sharing clear-text prompts in workflow files. It does not protect against someone with access to the local ComfyUI machine, browser session, Python process, or node outputs during execution.
+
 ## Editor, Highlighting, And IntelliSense
 
 The prompt editor is a real textarea. Below it, the rendered preview highlights variables:
@@ -216,6 +232,7 @@ Library schema:
   "version": 1,
   "selectedFolderId": "all",
   "selectedPromptId": "prompt1",
+  "privacyMode": false,
   "folders": [{ "id": "folder1", "name": "Portraits", "hidden": false }],
   "prompts": [
     {
@@ -248,11 +265,14 @@ Library schema:
 
 Malformed JSON is reported in the UI and backend warnings. Merge import avoids ID collisions and keeps existing conflicting variables.
 
+When Privacy mode is enabled, the saved workflow contains an encrypted envelope instead of this clear-text schema. Full library export remains an explicit clear-text export action.
+
 ## Known Limitations
 
 - Prompt history is not included in v1.
 - The editor is not a full rich text editor; this is intentional for ComfyUI compatibility.
 - Autocomplete cursor positioning uses a practical popup placement instead of exact textarea caret geometry.
+- Privacy mode requires the Python `cryptography` package and the local `config/privacy_key.json` file.
 - The JavaScript UI mirrors backend resolution logic, but the Python backend remains the source of truth for actual node outputs.
 
 ## Development
@@ -267,6 +287,7 @@ Core modules:
 
 - `resolver.py`: deterministic variable resolver
 - `schema.py`: schema defaults, normalization, and import merge helpers
+- `privacy.py`: local AES-GCM workflow encryption helpers
 - `validation.py`: warning generation
 - `nodes.py`: ComfyUI node class
 - `web/js/smart_prompt_manager.js`: browser UI extension

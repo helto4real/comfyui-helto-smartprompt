@@ -9,15 +9,70 @@ from typing import Any
 try:
     from .resolver import needed_variable_definitions, resolve_prompt
     from .schema import default_state, parse_state, selected_prompt, state_to_json
+    from .privacy import PrivacyError, crypto_status, decrypt_state, encrypt_state, is_encrypted_payload
     from .validation import validate_state
 except ImportError:  # Allows running tests from the repository root.
     from resolver import needed_variable_definitions, resolve_prompt
     from schema import default_state, parse_state, selected_prompt, state_to_json
+    from privacy import PrivacyError, crypto_status, decrypt_state, encrypt_state, is_encrypted_payload
     from validation import validate_state
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _empty_state() -> dict[str, Any]:
+    state = default_state()
+    state["prompts"] = []
+    state["folders"] = []
+    state["variables"] = {}
+    state["selectedPromptId"] = ""
+    state["selectedFolderId"] = "all"
+    return state
+
+
+def parse_spm_data(value: Any):
+    if is_encrypted_payload(value):
+        try:
+            return decrypt_state(value)
+        except PrivacyError as exc:
+            state = _empty_state()
+            state["privacyMode"] = True
+            return state, [str(exc)]
+    return parse_state(value)
+
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+
+    routes = PromptServer.instance.routes
+
+    @routes.get("/helto_spm/privacy/status")
+    async def helto_spm_privacy_status(_request):
+        return web.json_response({"ok": True, "status": crypto_status()})
+
+    @routes.post("/helto_spm/privacy/encrypt")
+    async def helto_spm_privacy_encrypt(request):
+        try:
+            payload = await request.json()
+            envelope = encrypt_state(payload.get("state", {}))
+            return web.json_response({"ok": True, "envelope": envelope, "status": crypto_status()})
+        except Exception as exc:  # noqa: BLE001 - API should return a readable UI error.
+            return web.json_response({"ok": False, "error": str(exc), "status": crypto_status()}, status=400)
+
+    @routes.post("/helto_spm/privacy/decrypt")
+    async def helto_spm_privacy_decrypt(request):
+        try:
+            payload = await request.json()
+            state, warnings = decrypt_state(payload.get("payload", {}))
+            return web.json_response({"ok": True, "state": state, "warnings": warnings, "status": crypto_status()})
+        except Exception as exc:  # noqa: BLE001 - API should return a readable UI error.
+            return web.json_response({"ok": False, "error": str(exc), "status": crypto_status()}, status=400)
+
+except Exception:
+    pass
 
 
 class SmartPromptManager:
@@ -59,7 +114,7 @@ class SmartPromptManager:
         return hashlib.sha256(payload).hexdigest()
 
     def resolve(self, spm_data: str, seed: int = 0, reroll: int = 0):
-        state, parse_warnings = parse_state(spm_data)
+        state, parse_warnings = parse_spm_data(spm_data)
         prompt = selected_prompt(state)
         raw_prompt = str(prompt.get("text", "")) if prompt else ""
         prompt_name = str(prompt.get("title", "")) if prompt else ""

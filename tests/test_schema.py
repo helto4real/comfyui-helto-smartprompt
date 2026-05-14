@@ -30,6 +30,7 @@ class SchemaTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertEqual(parsed["version"], 1)
         self.assertEqual(len(parsed["prompts"]), len(state["prompts"]))
+        self.assertFalse(parsed["privacyMode"])
 
     def test_hidden_flags_are_preserved(self):
         state, warnings = normalize_state(

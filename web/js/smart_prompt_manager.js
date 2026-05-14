@@ -86,6 +86,7 @@ function defaultState() {
     selectedFolderId: "all",
     selectedPromptId: promptId,
     search: "",
+    privacyMode: false,
     folders: [{ id: folderId, name: "Portraits", hidden: false }],
     prompts: [
       {
@@ -172,6 +173,22 @@ function parseState(value) {
   return normalizeState(parsed);
 }
 
+function parseJsonObject(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isEncryptedStateValue(value) {
+  const parsed = parseJsonObject(value);
+  return parsed.encrypted === true && parsed.schema === "comfyui-helto-prompts.smart-prompt-manager";
+}
+
 function normalizeState(data) {
   if (!data || typeof data !== "object") return defaultState();
   const state = defaultState();
@@ -236,6 +253,7 @@ function normalizeState(data) {
     selectedFolderId,
     selectedPromptId,
     search: String(data.search ?? ""),
+    privacyMode: Boolean(data.privacyMode),
     folders,
     prompts,
     variables,
@@ -372,6 +390,11 @@ function setWidgetValue(node, widget, state) {
   if (node.graph) node.graph.setDirtyCanvas(true, true);
 }
 
+function setWidgetRawValue(node, widget, value) {
+  widget.value = value;
+  if (node.graph) node.graph.setDirtyCanvas(true, true);
+}
+
 function hideWidget(widget) {
   if (!widget) return;
   widget.hidden = true;
@@ -481,12 +504,16 @@ function enhanceNode(node) {
   node.__spmEnhanced = true;
   hideWidget(dataWidget);
 
-  let state = parseState(dataWidget.value);
-  let status = "";
+  const initialEncryptedValue = isEncryptedStateValue(dataWidget.value) ? dataWidget.value : "";
+  let state = initialEncryptedValue ? defaultState() : parseState(dataWidget.value);
+  let status = initialEncryptedValue ? "Decrypting private prompt library..." : "";
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
   let tooltip = null;
   let lastThemeKey = "";
   let nodeHovering = false;
+  let privacyLocked = Boolean(initialEncryptedValue);
+  let privacyBusy = false;
+  let encryptSequence = 0;
   const root = createElement("div", "spm-root");
 
   const seedWidget = node.widgets?.find((widget) => widget.name === "seed");
@@ -561,9 +588,91 @@ function enhanceNode(node) {
     }
   }
 
+  async function privacyPost(endpoint, payload) {
+    const response = await fetch(`/helto_spm/privacy/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.ok === false) throw new Error(result.error || `Privacy ${endpoint} failed.`);
+    return result;
+  }
+
+  function cloneState(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  async function encryptAndSetWidget(snapshot, { allowClearOnFailure = false, renderAfter = false } = {}) {
+    const sequence = ++encryptSequence;
+    privacyBusy = true;
+    try {
+      const result = await privacyPost("encrypt", { state: snapshot });
+      if (sequence !== encryptSequence) return;
+      setWidgetRawValue(node, dataWidget, JSON.stringify(result.envelope, null, 2));
+      status = "Privacy mode enabled.";
+    } catch (error) {
+      if (sequence !== encryptSequence) return;
+      if (allowClearOnFailure) {
+        state.privacyMode = false;
+        setWidgetValue(node, dataWidget, state);
+      }
+      status = `Privacy error: ${error.message}`;
+    } finally {
+      if (sequence === encryptSequence) {
+        privacyBusy = false;
+        if (renderAfter) renderUi();
+      }
+    }
+  }
+
+  async function decryptInitialState() {
+    privacyBusy = true;
+    try {
+      const result = await privacyPost("decrypt", { payload: parseJsonObject(initialEncryptedValue) });
+      state = normalizeState(result.state);
+      state.privacyMode = true;
+      privacyLocked = false;
+      status = result.warnings?.length ? `Privacy mode unlocked with ${result.warnings.length} warning(s).` : "Privacy mode unlocked.";
+      saveWithoutRender();
+    } catch (error) {
+      privacyLocked = true;
+      status = `Privacy error: ${error.message}`;
+    } finally {
+      privacyBusy = false;
+      renderUi();
+    }
+  }
+
+  async function setPrivacyMode(enabled) {
+    if (privacyLocked || privacyBusy) return;
+    if (enabled === Boolean(state.privacyMode)) return;
+    if (enabled) {
+      state.privacyMode = true;
+      status = "Encrypting prompt library...";
+      privacyBusy = true;
+      renderUi();
+      await encryptAndSetWidget(cloneState(normalizeState(state)), { allowClearOnFailure: true, renderAfter: true });
+      return;
+    }
+    if (!confirm("Disable Privacy mode? This will save the prompt library in clear text inside the workflow.")) {
+      renderUi();
+      return;
+    }
+    encryptSequence += 1;
+    privacyBusy = false;
+    state.privacyMode = false;
+    status = "Privacy mode disabled. Workflow data is clear text.";
+    save();
+  }
+
   function save(render = true) {
     state = normalizeState(state);
-    setWidgetValue(node, dataWidget, state);
+    if (state.privacyMode) {
+      void encryptAndSetWidget(cloneState(state), { renderAfter: false });
+    } else {
+      setWidgetValue(node, dataWidget, state);
+    }
     if (render) renderUi();
   }
 
@@ -595,7 +704,12 @@ function enhanceNode(node) {
   }
 
   function saveWithoutRender() {
-    setWidgetValue(node, dataWidget, state);
+    state = normalizeState(state);
+    if (state.privacyMode) {
+      void encryptAndSetWidget(cloneState(state), { renderAfter: false });
+    } else {
+      setWidgetValue(node, dataWidget, state);
+    }
   }
 
   function stopComfyShortcuts(container) {
@@ -1335,6 +1449,24 @@ function enhanceNode(node) {
   }
 
   function renderUi() {
+    if (privacyLocked) {
+      root.innerHTML = `
+        <div class="spm-row-wrap">
+          <label title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" title="Encrypt prompt library JSON in saved workflows" checked disabled> Privacy mode</label>
+          ${iconButton("delete", "Reset encrypted prompt data", 'data-action="reset-private-data"', "spm-btn-danger")}
+          <span class="spm-muted">${escapeHtml(privacyBusy ? "Decrypting..." : status)}</span>
+        </div>
+        <details class="spm-section" open><summary>Private Library Locked</summary>
+          <div class="spm-warn">This workflow contains encrypted Smart Prompt Manager data, but it could not be decrypted with the local key file.</div>
+          <div class="spm-muted">Restore the matching <code>config/privacy_key.json</code> file and refresh ComfyUI. Resetting discards the encrypted prompt library for this node.</div>
+        </details>
+      `;
+      setTimeout(() => {
+        syncPanelSize();
+        ensureMinimumNodeSize();
+      }, 0);
+      return;
+    }
     const prompt = selectedPrompt(state);
     const resolution = currentResolution(prompt);
     const warnings = [...validateState(state), ...resolution.warnings];
@@ -1363,6 +1495,7 @@ function enhanceNode(node) {
         ${iconButton("folder", "Edit folders", 'data-action="open-folders-editor"')}
         ${iconButton("variable", "Edit variables", 'data-action="open-variables-editor"')}
         ${iconButton("reroll", "Reroll variables", 'data-action="reroll"')}
+        <label title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" title="Encrypt prompt library JSON in saved workflows" data-privacy-mode ${state.privacyMode ? "checked" : ""} ${privacyBusy ? "disabled" : ""}> Privacy mode</label>
         <span class="spm-muted">${escapeHtml(status)}</span>
       </div>
       <details class="spm-section" open><summary>Prompt Library</summary>
@@ -1446,6 +1579,24 @@ function enhanceNode(node) {
   });
 
   root.addEventListener("click", async (event) => {
+    const privacyToggle = event.target.closest?.("[data-privacy-mode]");
+    if (privacyToggle) {
+      event.stopPropagation();
+      await setPrivacyMode(privacyToggle.checked);
+      return;
+    }
+    const action = event.target.closest?.("[data-action]")?.dataset.action;
+    if (action === "reset-private-data") {
+      if (!confirm("Reset encrypted prompt data for this node? This discards the encrypted library if the local key cannot be restored.")) return;
+      privacyLocked = false;
+      privacyBusy = false;
+      state = defaultState();
+      state.privacyMode = false;
+      status = "Encrypted prompt data reset.";
+      save();
+      return;
+    }
+    if (privacyLocked) return;
     const promptItem = event.target.closest?.("[data-prompt-id]");
     if (promptItem) {
       state.selectedPromptId = promptItem.dataset.promptId;
@@ -1459,7 +1610,6 @@ function enhanceNode(node) {
       acceptAutocomplete(textarea);
       return;
     }
-    const action = event.target.closest?.("[data-action]")?.dataset.action;
     if (!action) return;
     try {
       if (action === "reroll") {
@@ -1550,7 +1700,12 @@ function enhanceNode(node) {
     savePreservingFocus(event.target);
   });
 
-  root.addEventListener("change", (event) => {
+  root.addEventListener("change", async (event) => {
+    if (privacyLocked) return;
+    if (event.target.matches("[data-privacy-mode]")) {
+      await setPrivacyMode(event.target.checked);
+      return;
+    }
     const prompt = selectedPrompt(state);
     if (event.target.dataset.promptField && prompt && !prompt.locked) {
       const field = event.target.dataset.promptField;
@@ -1636,11 +1791,12 @@ function enhanceNode(node) {
   } else {
     node.addWidget("button", "Smart Prompt Manager UI unavailable", null, () => {});
   }
-  save(false);
+  if (!privacyLocked) save(false);
   ensureMinimumNodeSize();
   refreshNodeTheme(true);
   syncPanelSize();
   renderUi();
+  if (initialEncryptedValue) void decryptInitialState();
 }
 
 app.registerExtension({
