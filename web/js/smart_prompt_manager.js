@@ -496,7 +496,7 @@ function enhanceNode(node) {
         prompt.title,
         prompt.text,
         prompt.description,
-        prompt.tags.join(" "),
+        Array.isArray(prompt.tags) ? prompt.tags.join(" ") : String(prompt.tags || ""),
         folderName(state, prompt.folderId),
       ]
         .join(" ")
@@ -557,8 +557,7 @@ function enhanceNode(node) {
     renderUi();
   }
 
-  function selectedPromptJson() {
-    const prompt = selectedPrompt(state);
+  function promptJson(prompt) {
     if (!prompt) return "";
     const vars = {};
     for (const name of variablesUsed(prompt.text)) {
@@ -574,6 +573,10 @@ function enhanceNode(node) {
       null,
       2,
     );
+  }
+
+  function selectedPromptJson() {
+    return promptJson(selectedPrompt(state));
   }
 
   function addPromptFromJson(raw) {
@@ -707,24 +710,24 @@ function enhanceNode(node) {
       .join("");
   }
 
-  function acceptAutocompleteInPromptDialog(textarea, popup, updatePreview) {
+  function acceptAutocompleteInPromptDialog(textarea, popup, updatePreview, prompt, persistImmediately) {
     if (!autocomplete.open || !autocomplete.items.length) return;
     const name = autocomplete.items[autocomplete.active];
     textarea.value = `${textarea.value.slice(0, autocomplete.start)}{{${name}}}${textarea.value.slice(autocomplete.end)}`;
     textarea.selectionStart = textarea.selectionEnd = autocomplete.start + name.length + 4;
-    const prompt = selectedPrompt(state);
     if (prompt && !prompt.locked) {
       prompt.text = textarea.value;
       prompt.updatedAt = nowIso();
     }
     autocomplete.open = false;
-    saveWithoutRender();
+    if (persistImmediately) saveWithoutRender();
     updatePreview();
     renderAutocompleteInto(popup);
   }
 
-  function openPromptDialog() {
-    const prompt = selectedPrompt(state);
+  function openPromptDialog(options = {}) {
+    const isDraft = Boolean(options.draftPrompt);
+    const prompt = options.draftPrompt || selectedPrompt(state);
     if (!prompt) return;
     const backdrop = createElement("div", "spm-modal-backdrop");
     const modal = createElement("div", "spm-modal");
@@ -734,7 +737,7 @@ function enhanceNode(node) {
       .join("");
     modal.innerHTML = `
       <div class="spm-modal-header">
-        <div class="spm-modal-title">Edit Prompt</div>
+        <div class="spm-modal-title">${isDraft ? "Add Prompt" : "Edit Prompt"}</div>
         <div class="spm-row-wrap">
           <button class="spm-btn" data-dialog-action="save-close">Done</button>
           <button class="spm-btn spm-btn-quiet" data-dialog-action="close">Close</button>
@@ -771,12 +774,24 @@ function enhanceNode(node) {
       modal.querySelector("[data-dialog-highlight]").innerHTML = renderPreview(prompt.text || "", nextResolution);
       modal.querySelector("[data-dialog-resolved]").textContent = nextResolution.resolved_prompt;
     };
-    const close = (render = true) => {
+    const close = (commit = false) => {
       autocomplete.open = false;
       const tagsInput = modal.querySelector("[data-dialog-prompt-field='tags']");
       if (tagsInput && !prompt.locked) prompt.tags = normalizeTags(tagsInput.value);
       backdrop.remove();
-      if (render) save();
+      if (isDraft) {
+        if (commit) {
+          const existingNames = state.prompts.map((item) => item.title);
+          if (state.prompts.some((item) => item.title.toLowerCase() === prompt.title.toLowerCase())) {
+            prompt.title = suffixName(prompt.title, existingNames);
+          }
+          state.prompts.push(prompt);
+          state.selectedPromptId = prompt.id;
+          save();
+        }
+        return;
+      }
+      save();
     };
 
     modal.addEventListener("input", (event) => {
@@ -789,7 +804,7 @@ function enhanceNode(node) {
         renderAutocompleteInto(popup);
         updatePreview();
       }
-      saveWithoutRender();
+      if (!isDraft) saveWithoutRender();
     });
     modal.addEventListener("change", (event) => {
       if (event.target.dataset.dialogPromptField && !prompt.locked) {
@@ -798,30 +813,31 @@ function enhanceNode(node) {
         if (field === "tags") event.target.value = tagsForInput(prompt.tags);
         prompt.updatedAt = nowIso();
         updatePreview();
-        saveWithoutRender();
+        if (!isDraft) saveWithoutRender();
       }
       if (event.target.dataset.dialogPromptBool) {
         prompt[event.target.dataset.dialogPromptBool] = event.target.checked;
         prompt.updatedAt = nowIso();
-        saveWithoutRender();
+        if (!isDraft) saveWithoutRender();
       }
     });
     modal.addEventListener("click", async (event) => {
       const suggestion = event.target.closest?.("[data-suggest]");
       if (suggestion) {
         autocomplete.active = autocomplete.items.indexOf(suggestion.dataset.suggest);
-        acceptAutocompleteInPromptDialog(editor, popup, updatePreview);
+        acceptAutocompleteInPromptDialog(editor, popup, updatePreview, prompt, !isDraft);
         return;
       }
       const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
-      if (action === "close" || action === "save-close") close(true);
+      if (action === "close") close(false);
+      if (action === "save-close") close(true);
       if (action === "copy-resolved") await copyText(currentResolution(prompt).resolved_prompt, "[data-role='json-box']");
-      if (action === "copy-prompt-json") await copyText(selectedPromptJson(), "[data-role='json-box']");
+      if (action === "copy-prompt-json") await copyText(promptJson(prompt), "[data-role='json-box']");
     });
     modal.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !autocomplete.open) {
         event.preventDefault();
-        close(true);
+        close(false);
         return;
       }
       if (event.target !== editor) return;
@@ -845,7 +861,7 @@ function enhanceNode(node) {
       }
       if (event.ctrlKey && autocomplete.open && event.key.toLowerCase() === KEYS.accept) {
         event.preventDefault();
-        acceptAutocompleteInPromptDialog(editor, popup, updatePreview);
+        acceptAutocompleteInPromptDialog(editor, popup, updatePreview, prompt, !isDraft);
       }
     });
     modal.querySelector("[data-dialog-prompt-field='title']")?.focus();
@@ -1069,8 +1085,21 @@ function enhanceNode(node) {
       if (action === "add-prompt") {
         const created = nowIso();
         const id = makeId("prompt");
-        state.prompts.push({ id, title: "Untitled prompt", text: "", description: "", folderId: "", tags: [], favorite: false, locked: false, createdAt: created, updatedAt: created });
-        state.selectedPromptId = id;
+        openPromptDialog({
+          draftPrompt: {
+            id,
+            title: "Untitled prompt",
+            text: "",
+            description: "",
+            folderId: state.selectedFolderId && !VIRTUAL_FOLDERS.some((folder) => folder.id === state.selectedFolderId) ? state.selectedFolderId : "",
+            tags: [],
+            favorite: false,
+            locked: false,
+            createdAt: created,
+            updatedAt: created,
+          },
+        });
+        return;
       } else if (action === "duplicate-prompt" && currentPrompt) {
         const copy = { ...currentPrompt, id: makeId("prompt"), title: suffixName(currentPrompt.title, state.prompts.map((item) => item.title)), locked: false, createdAt: nowIso(), updatedAt: nowIso() };
         state.prompts.push(copy);
@@ -1136,8 +1165,16 @@ function enhanceNode(node) {
 
   root.addEventListener("input", (event) => {
     const prompt = selectedPrompt(state);
-    if (event.target.matches("[data-field='selectedFolderId']")) state.selectedFolderId = event.target.value;
-    if (event.target.matches("[data-field='search']")) state.search = event.target.value;
+    if (event.target.matches("[data-field='search']")) {
+      state.search = event.target.value;
+      savePreservingFocus(event.target);
+      return;
+    }
+    if (event.target.matches("[data-field='selectedFolderId']")) {
+      state.selectedFolderId = event.target.value;
+      savePreservingFocus(event.target);
+      return;
+    }
     if (prompt && !prompt.locked && event.target.dataset.promptField) {
       const field = event.target.dataset.promptField;
       prompt[field] = field === "tags" ? tagsFromDraft(event.target.value) : event.target.value;
