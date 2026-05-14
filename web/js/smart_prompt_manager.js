@@ -121,6 +121,15 @@ function normalizeTags(value) {
   return tags;
 }
 
+function tagsFromDraft(value) {
+  return String(value ?? "").split(",");
+}
+
+function tagsForInput(value) {
+  if (!Array.isArray(value)) return String(value ?? "");
+  return value.join(",");
+}
+
 function parseState(value) {
   let parsed = {};
   if (value && typeof value === "object") parsed = value;
@@ -144,7 +153,8 @@ function normalizeState(data) {
     let id = String(folder.id || "").trim();
     if (!id || folderIds.has(id) || ["all", "unsorted", "favorites"].includes(id)) id = makeId("folder");
     folderIds.add(id);
-    folders.push({ id, name: String(folder.name || "Folder").trim() || "Folder" });
+    const rawName = String(folder.name ?? "");
+    folders.push({ id, name: rawName.trim() ? rawName : "Folder" });
   }
   const prompts = [];
   const promptIds = new Set();
@@ -154,9 +164,10 @@ function normalizeState(data) {
     if (!id || promptIds.has(id)) id = makeId("prompt");
     promptIds.add(id);
     const folderId = folderIds.has(prompt.folderId) ? prompt.folderId : "";
+    const rawTitle = String(prompt.title ?? "");
     prompts.push({
       id,
-      title: String(prompt.title || "Untitled prompt").trim() || "Untitled prompt",
+      title: rawTitle.trim() ? rawTitle : "Untitled prompt",
       text: String(prompt.text ?? ""),
       description: String(prompt.description ?? ""),
       folderId,
@@ -331,6 +342,10 @@ function createElement(tag, className, html = "") {
   return element;
 }
 
+function isEditableField(target) {
+  return Boolean(target?.closest?.("input, textarea, select, button"));
+}
+
 function injectStyles() {
   if (document.getElementById("spm-styles")) return;
   const style = document.createElement("style");
@@ -354,6 +369,14 @@ function injectStyles() {
     .spm-autocomplete{position:absolute;z-index:10000;background:#101820;border:1px solid #53657a;border-radius:4px;box-shadow:0 8px 22px rgba(0,0,0,.35);max-height:150px;overflow:auto;min-width:210px}
     .spm-suggestion{display:flex;gap:8px;justify-content:space-between;padding:5px 7px;cursor:pointer}.spm-suggestion.is-active{background:#24537a}.spm-suggestion-name{font-weight:700;color:#dff7ff}
     .spm-copybox{width:100%;min-height:54px}.spm-tooltip{position:absolute;z-index:10001;max-width:320px;background:#0d131a;border:1px solid #526174;border-radius:5px;padding:7px;color:#f8fafc;box-shadow:0 8px 24px rgba(0,0,0,.4);pointer-events:none}
+    .spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+    .spm-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:#171d26;color:#e8edf2;border:1px solid #536174;border-radius:8px;box-shadow:0 22px 70px rgba(0,0,0,.55);padding:12px;box-sizing:border-box;font:13px system-ui,sans-serif}
+    .spm-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #343e4c;padding-bottom:8px;margin-bottom:10px}.spm-modal-title{font-weight:700;font-size:15px}
+    .spm-modal input,.spm-modal textarea,.spm-modal select{background:#0f151d;color:#edf2f7;border:1px solid #3c4655;border-radius:4px;padding:6px;font:13px system-ui,sans-serif;box-sizing:border-box}
+    .spm-modal textarea{width:100%;resize:vertical}.spm-dialog-editor{min-height:220px}.spm-dialog-description{min-height:70px}
+    .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:7px 0}.spm-modal .spm-preview{max-height:170px}.spm-modal-field{display:flex;flex-direction:column;gap:4px;flex:1}.spm-modal-field label{font-size:11px;color:#aeb8c6}
+    .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:5px;align-items:start}.spm-modal-grid textarea{min-height:54px}
+    .spm-node-summary{background:#101820;border:1px solid #303a48;border-radius:4px;padding:6px;line-height:1.35}.spm-node-summary-title{font-weight:700;color:#f8fafc}
   `;
   document.head.appendChild(style);
 }
@@ -431,6 +454,27 @@ function enhanceNode(node) {
     if (start !== null && typeof next.setSelectionRange === "function") {
       const max = String(next.value || "").length;
       next.setSelectionRange(Math.min(start, max), Math.min(end ?? start, max));
+    }
+  }
+
+  function saveWithoutRender() {
+    setWidgetValue(node, dataWidget, state);
+  }
+
+  function stopComfyShortcuts(container) {
+    for (const type of ["pointerdown", "pointerup", "wheel"]) {
+      container.addEventListener(
+        type,
+        (event) => {
+          event.stopPropagation();
+        },
+        true,
+      );
+    }
+    for (const type of ["keydown", "keyup"]) {
+      container.addEventListener(type, (event) => {
+        if (isEditableField(event.target)) event.stopPropagation();
+      });
     }
   }
 
@@ -647,6 +691,260 @@ function enhanceNode(node) {
     </div>`;
   }
 
+  function renderAutocompleteInto(popup) {
+    if (!autocomplete.open || !autocomplete.items.length) {
+      popup.innerHTML = "";
+      popup.style.display = "none";
+      return;
+    }
+    popup.style.display = "block";
+    popup.innerHTML = autocomplete.items
+      .map((name, index) => {
+        const definition = state.variables[name];
+        const extra = `${definition.mode} · ${normalizeValues(definition.values).length} values${definition.fixedValue ? ` · ${definition.fixedValue}` : ""}`;
+        return `<div class="spm-suggestion ${index === autocomplete.active ? "is-active" : ""}" data-suggest="${escapeHtml(name)}"><span class="spm-suggestion-name">${escapeHtml(name)}</span><span class="spm-mini">${escapeHtml(extra)}</span></div>`;
+      })
+      .join("");
+  }
+
+  function acceptAutocompleteInPromptDialog(textarea, popup, updatePreview) {
+    if (!autocomplete.open || !autocomplete.items.length) return;
+    const name = autocomplete.items[autocomplete.active];
+    textarea.value = `${textarea.value.slice(0, autocomplete.start)}{{${name}}}${textarea.value.slice(autocomplete.end)}`;
+    textarea.selectionStart = textarea.selectionEnd = autocomplete.start + name.length + 4;
+    const prompt = selectedPrompt(state);
+    if (prompt && !prompt.locked) {
+      prompt.text = textarea.value;
+      prompt.updatedAt = nowIso();
+    }
+    autocomplete.open = false;
+    saveWithoutRender();
+    updatePreview();
+    renderAutocompleteInto(popup);
+  }
+
+  function openPromptDialog() {
+    const prompt = selectedPrompt(state);
+    if (!prompt) return;
+    const backdrop = createElement("div", "spm-modal-backdrop");
+    const modal = createElement("div", "spm-modal");
+    const resolution = currentResolution(prompt);
+    const folderOptions = [`<option value="">Unsorted</option>`]
+      .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
+      .join("");
+    modal.innerHTML = `
+      <div class="spm-modal-header">
+        <div class="spm-modal-title">Edit Prompt</div>
+        <div class="spm-row-wrap">
+          <button class="spm-btn" data-dialog-action="save-close">Done</button>
+          <button class="spm-btn spm-btn-quiet" data-dialog-action="close">Close</button>
+        </div>
+      </div>
+      <div class="spm-row">
+        <div class="spm-modal-field"><label>Title</label><input type="text" data-dialog-prompt-field="title" value="${escapeHtml(prompt.title || "")}" ${prompt.locked ? "disabled" : ""}></div>
+        <div class="spm-modal-field"><label>Folder</label><select data-dialog-prompt-field="folderId" ${prompt.locked ? "disabled" : ""}>${folderOptions}</select></div>
+        <div class="spm-modal-field"><label>Tags</label><input type="text" data-dialog-prompt-field="tags" value="${escapeHtml(tagsForInput(prompt.tags))}" placeholder="portrait, cinematic" ${prompt.locked ? "disabled" : ""}></div>
+      </div>
+      <div class="spm-row-wrap">
+        <label><input type="checkbox" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
+        <label><input type="checkbox" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
+      </div>
+      <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
+      <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
+      <div class="spm-row-wrap">
+        <button class="spm-btn" data-dialog-action="copy-resolved">Copy resolved</button>
+        <button class="spm-btn" data-dialog-action="copy-prompt-json">Copy prompt JSON</button>
+      </div>
+      <div class="spm-mini">Highlighted preview</div>
+      <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "", resolution)}</div>
+      <div class="spm-mini">Resolved preview</div>
+      <div class="spm-preview" data-dialog-resolved>${escapeHtml(resolution.resolved_prompt)}</div>
+    `;
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    stopComfyShortcuts(backdrop);
+
+    const editor = modal.querySelector(".spm-dialog-editor");
+    const popup = modal.querySelector("[data-dialog-autocomplete]");
+    const updatePreview = () => {
+      const nextResolution = currentResolution(prompt);
+      modal.querySelector("[data-dialog-highlight]").innerHTML = renderPreview(prompt.text || "", nextResolution);
+      modal.querySelector("[data-dialog-resolved]").textContent = nextResolution.resolved_prompt;
+    };
+    const close = (render = true) => {
+      autocomplete.open = false;
+      const tagsInput = modal.querySelector("[data-dialog-prompt-field='tags']");
+      if (tagsInput && !prompt.locked) prompt.tags = normalizeTags(tagsInput.value);
+      backdrop.remove();
+      if (render) save();
+    };
+
+    modal.addEventListener("input", (event) => {
+      if (!event.target.dataset.dialogPromptField || prompt.locked) return;
+      const field = event.target.dataset.dialogPromptField;
+      prompt[field] = field === "tags" ? tagsFromDraft(event.target.value) : event.target.value;
+      prompt.updatedAt = nowIso();
+      if (field === "text") {
+        updateAutocomplete(event.target);
+        renderAutocompleteInto(popup);
+        updatePreview();
+      }
+      saveWithoutRender();
+    });
+    modal.addEventListener("change", (event) => {
+      if (event.target.dataset.dialogPromptField && !prompt.locked) {
+        const field = event.target.dataset.dialogPromptField;
+        prompt[field] = field === "tags" ? normalizeTags(event.target.value) : event.target.value;
+        if (field === "tags") event.target.value = tagsForInput(prompt.tags);
+        prompt.updatedAt = nowIso();
+        updatePreview();
+        saveWithoutRender();
+      }
+      if (event.target.dataset.dialogPromptBool) {
+        prompt[event.target.dataset.dialogPromptBool] = event.target.checked;
+        prompt.updatedAt = nowIso();
+        saveWithoutRender();
+      }
+    });
+    modal.addEventListener("click", async (event) => {
+      const suggestion = event.target.closest?.("[data-suggest]");
+      if (suggestion) {
+        autocomplete.active = autocomplete.items.indexOf(suggestion.dataset.suggest);
+        acceptAutocompleteInPromptDialog(editor, popup, updatePreview);
+        return;
+      }
+      const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
+      if (action === "close" || action === "save-close") close(true);
+      if (action === "copy-resolved") await copyText(currentResolution(prompt).resolved_prompt, "[data-role='json-box']");
+      if (action === "copy-prompt-json") await copyText(selectedPromptJson(), "[data-role='json-box']");
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !autocomplete.open) {
+        event.preventDefault();
+        close(true);
+        return;
+      }
+      if (event.target !== editor) return;
+      if (event.key === KEYS.close && autocomplete.open) {
+        autocomplete.open = false;
+        event.preventDefault();
+        renderAutocompleteInto(popup);
+        return;
+      }
+      if (event.ctrlKey && autocomplete.open && event.key.toLowerCase() === KEYS.next) {
+        autocomplete.active = (autocomplete.active + 1) % autocomplete.items.length;
+        event.preventDefault();
+        renderAutocompleteInto(popup);
+        return;
+      }
+      if (event.ctrlKey && autocomplete.open && event.key.toLowerCase() === KEYS.previous) {
+        autocomplete.active = (autocomplete.active + autocomplete.items.length - 1) % autocomplete.items.length;
+        event.preventDefault();
+        renderAutocompleteInto(popup);
+        return;
+      }
+      if (event.ctrlKey && autocomplete.open && event.key.toLowerCase() === KEYS.accept) {
+        event.preventDefault();
+        acceptAutocompleteInPromptDialog(editor, popup, updatePreview);
+      }
+    });
+    modal.querySelector("[data-dialog-prompt-field='title']")?.focus();
+  }
+
+  function openVariablesDialog() {
+    const backdrop = createElement("div", "spm-modal-backdrop");
+    const modal = createElement("div", "spm-modal");
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    stopComfyShortcuts(backdrop);
+
+    const renderVariables = () => {
+      const variableRows = Object.entries(state.variables)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(
+          ([name, definition]) => `<div class="spm-modal-grid" data-var-row="${escapeHtml(name)}">
+            <input data-var-name="${escapeHtml(name)}" value="${escapeHtml(name)}">
+            <select data-var-mode="${escapeHtml(name)}">${MODES.map((mode) => `<option value="${mode}" ${mode === definition.mode ? "selected" : ""}>${mode}</option>`).join("")}</select>
+            <textarea data-var-values="${escapeHtml(name)}">${escapeHtml(normalizeValues(definition.values).join("\n"))}</textarea>
+            <input data-var-fixed="${escapeHtml(name)}" value="${escapeHtml(definition.fixedValue || "")}">
+            <input data-var-fallback="${escapeHtml(name)}" value="${escapeHtml(definition.fallback || "")}">
+            <input data-var-description="${escapeHtml(name)}" value="${escapeHtml(definition.description || "")}">
+            <button class="spm-btn spm-btn-danger" data-dialog-action="remove-variable" data-var="${escapeHtml(name)}">×</button>
+          </div>`,
+        )
+        .join("");
+      modal.innerHTML = `
+        <div class="spm-modal-header">
+          <div class="spm-modal-title">Edit Variables</div>
+          <div class="spm-row-wrap">
+            <button class="spm-btn" data-dialog-action="add-variable">Add variable</button>
+            <button class="spm-btn" data-dialog-action="save-close">Done</button>
+          </div>
+        </div>
+        <div class="spm-modal-grid spm-grid-head"><span>Name</span><span>Mode</span><span>Values</span><span>Fixed</span><span>Fallback</span><span>Description</span><span></span></div>
+        ${variableRows || '<div class="spm-muted">No variables yet.</div>'}
+      `;
+    };
+    renderVariables();
+
+    const close = () => {
+      backdrop.remove();
+      save();
+    };
+    modal.addEventListener("input", (event) => {
+      if (event.target.dataset.varValues) state.variables[event.target.dataset.varValues].values = normalizeValues(event.target.value);
+      if (event.target.dataset.varFixed) state.variables[event.target.dataset.varFixed].fixedValue = event.target.value || null;
+      if (event.target.dataset.varFallback) state.variables[event.target.dataset.varFallback].fallback = event.target.value;
+      if (event.target.dataset.varDescription) state.variables[event.target.dataset.varDescription].description = event.target.value;
+      if (event.target.dataset.varName) {
+        const oldName = event.target.dataset.varName;
+        const newName = event.target.value.trim();
+        if (VALID_NAME_RE.test(newName) && !state.variables[newName]) {
+          state.variables[newName] = state.variables[oldName];
+          delete state.variables[oldName];
+          const tokenPattern = new RegExp(`\\{\\{\\s*${oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g");
+          state.prompts.forEach((item) => {
+            item.text = item.text.replace(tokenPattern, `{{${newName}}}`);
+          });
+          event.target.dataset.varName = newName;
+        }
+      }
+      saveWithoutRender();
+    });
+    modal.addEventListener("change", (event) => {
+      if (event.target.dataset.varMode) {
+        state.variables[event.target.dataset.varMode].mode = event.target.value;
+        saveWithoutRender();
+      }
+    });
+    modal.addEventListener("click", (event) => {
+      const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
+      if (action === "save-close") close();
+      if (action === "add-variable") {
+        let name = "variable";
+        let index = 2;
+        while (state.variables[name]) {
+          name = `variable${index}`;
+          index += 1;
+        }
+        state.variables[name] = { mode: "random", values: ["value"], fixedValue: null, fallback: "", description: "" };
+        saveWithoutRender();
+        renderVariables();
+      }
+      if (action === "remove-variable") {
+        delete state.variables[event.target.dataset.var];
+        saveWithoutRender();
+        renderVariables();
+      }
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    });
+  }
+
   function renderUi() {
     const prompt = selectedPrompt(state);
     const resolution = currentResolution(prompt);
@@ -655,9 +953,6 @@ function enhanceNode(node) {
     const folderOptions = allFolders
       .map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === state.selectedFolderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`)
       .join("");
-    const realFolderOptions = [`<option value="">Unsorted</option>`]
-      .concat(state.folders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === prompt?.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`))
-      .join("");
     const list = visiblePrompts()
       .map(
         (item) => `<div class="spm-prompt-item ${item.id === state.selectedPromptId ? "is-selected" : ""}" data-prompt-id="${escapeHtml(item.id)}" title="${escapeHtml(promptHoverPreview(item))}">
@@ -665,20 +960,8 @@ function enhanceNode(node) {
         </div>`,
       )
       .join("");
-    const variableRows = Object.entries(state.variables)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(
-        ([name, definition]) => `<div class="spm-grid" data-var-row="${escapeHtml(name)}">
-          <input data-var-name="${escapeHtml(name)}" value="${escapeHtml(name)}">
-          <select data-var-mode="${escapeHtml(name)}">${MODES.map((mode) => `<option value="${mode}" ${mode === definition.mode ? "selected" : ""}>${mode}</option>`).join("")}</select>
-          <textarea data-var-values="${escapeHtml(name)}">${escapeHtml(normalizeValues(definition.values).join("\n"))}</textarea>
-          <input data-var-fixed="${escapeHtml(name)}" value="${escapeHtml(definition.fixedValue || "")}">
-          <input data-var-fallback="${escapeHtml(name)}" value="${escapeHtml(definition.fallback || "")}">
-          <input data-var-description="${escapeHtml(name)}" value="${escapeHtml(definition.description || "")}">
-          <button class="spm-btn spm-btn-danger" data-action="remove-variable" data-var="${escapeHtml(name)}">×</button>
-        </div>`,
-      )
-      .join("");
+    const usedVariables = prompt ? variablesUsed(prompt.text || "") : [];
+    const variableSummary = Object.keys(state.variables).sort((a, b) => a.localeCompare(b));
 
     root.innerHTML = `
       <div class="spm-row-wrap">
@@ -700,13 +983,14 @@ function enhanceNode(node) {
         </div>
         <div class="spm-prompt-list">${list || '<div class="spm-muted" style="padding:6px">No prompts match.</div>'}</div>
       </details>
-      <details class="spm-section" open><summary>Prompt Editor</summary>
-        <div class="spm-row"><input type="text" data-prompt-field="title" value="${escapeHtml(prompt?.title || "")}" placeholder="Prompt title" ${prompt?.locked ? "disabled" : ""}></div>
-        <div class="spm-row"><select data-prompt-field="folderId" ${prompt?.locked ? "disabled" : ""}>${realFolderOptions}</select><input type="text" data-prompt-field="tags" value="${escapeHtml(prompt?.tags?.join(", ") || "")}" placeholder="tags" ${prompt?.locked ? "disabled" : ""}></div>
-        <textarea data-prompt-field="description" placeholder="Description" ${prompt?.locked ? "disabled" : ""}>${escapeHtml(prompt?.description || "")}</textarea>
-        <textarea class="spm-editor" data-prompt-field="text" placeholder="Prompt text" ${prompt?.locked ? "disabled" : ""}>${escapeHtml(prompt?.text || "")}</textarea>
-        ${renderAutocomplete()}
+      <details class="spm-section" open><summary>Selected Prompt</summary>
+        <div class="spm-node-summary">
+          <div class="spm-node-summary-title">${escapeHtml(prompt?.title || "No prompt selected")}</div>
+          <div class="spm-mini">${escapeHtml(folderName(state, prompt?.folderId || ""))}${prompt?.tags?.length ? ` · ${escapeHtml(prompt.tags.join(", "))}` : ""}${prompt?.locked ? " · locked" : ""}</div>
+          ${prompt?.description ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
+        </div>
         <div class="spm-row-wrap">
+          <button class="spm-btn" data-action="open-prompt-editor" ${!prompt ? "disabled" : ""}>Edit prompt</button>
           <label><input type="checkbox" data-prompt-bool="favorite" ${prompt?.favorite ? "checked" : ""}> Favorite</label>
           <label><input type="checkbox" data-prompt-bool="locked" ${prompt?.locked ? "checked" : ""}> Locked</label>
           <button class="spm-btn" data-action="copy-resolved">Copy resolved</button>
@@ -718,9 +1002,11 @@ function enhanceNode(node) {
         <div class="spm-preview">${escapeHtml(resolution.resolved_prompt)}</div>
       </details>
       <details class="spm-section"><summary>Variables</summary>
-        <div class="spm-grid spm-grid-head"><span>Name</span><span>Mode</span><span>Values</span><span>Fixed</span><span>Fallback</span><span>Description</span><span></span></div>
-        ${variableRows || '<div class="spm-muted">No variables yet.</div>'}
-        <button class="spm-btn" data-action="add-variable">Add variable</button>
+        <div class="spm-node-summary">
+          <div>${variableSummary.length ? escapeHtml(variableSummary.join(", ")) : '<span class="spm-muted">No variables defined.</span>'}</div>
+          <div class="spm-mini">Used by selected prompt: ${usedVariables.length ? escapeHtml(usedVariables.join(", ")) : "none"}</div>
+        </div>
+        <button class="spm-btn" data-action="open-variables-editor">Edit variables</button>
       </details>
       <details class="spm-section"><summary>Import / Export</summary>
         <div class="spm-row-wrap">
@@ -794,6 +1080,12 @@ function enhanceNode(node) {
         state.selectedPromptId = state.prompts[0]?.id || "";
       } else if (action === "reroll") {
         if (rerollWidget) rerollWidget.value = (Number.parseInt(rerollWidget.value || 0, 10) || 0) + 1;
+      } else if (action === "open-prompt-editor") {
+        openPromptDialog();
+        return;
+      } else if (action === "open-variables-editor") {
+        openVariablesDialog();
+        return;
       } else if (action === "add-folder") {
         const name = window.prompt("Folder name", "New folder");
         if (name) state.folders.push({ id: makeId("folder"), name: name.trim() || "New folder" });
@@ -848,9 +1140,13 @@ function enhanceNode(node) {
     if (event.target.matches("[data-field='search']")) state.search = event.target.value;
     if (prompt && !prompt.locked && event.target.dataset.promptField) {
       const field = event.target.dataset.promptField;
-      prompt[field] = field === "tags" ? normalizeTags(event.target.value) : event.target.value;
+      prompt[field] = field === "tags" ? tagsFromDraft(event.target.value) : event.target.value;
       prompt.updatedAt = nowIso();
       if (field === "text") updateAutocomplete(event.target);
+      if (field === "title" || field === "tags" || field === "description") {
+        saveWithoutRender();
+        return;
+      }
     }
     if (event.target.dataset.varMode) state.variables[event.target.dataset.varMode].mode = event.target.value;
     if (event.target.dataset.varValues) state.variables[event.target.dataset.varValues].values = normalizeValues(event.target.value);
@@ -898,6 +1194,11 @@ function enhanceNode(node) {
   });
 
   root.addEventListener("keydown", (event) => {
+    if (isEditableField(event.target)) {
+      // ComfyUI binds graph shortcuts such as Space at the canvas/document level.
+      // Keep normal typing inside the embedded manager from reaching those handlers.
+      event.stopPropagation();
+    }
     const textarea = event.target.closest?.(".spm-editor");
     if (!textarea) return;
     if (event.key === KEYS.close && autocomplete.open) {
@@ -922,6 +1223,10 @@ function enhanceNode(node) {
       event.preventDefault();
       acceptAutocomplete(textarea);
     }
+  });
+
+  root.addEventListener("keyup", (event) => {
+    if (isEditableField(event.target)) event.stopPropagation();
   });
 
   const originalOnResize = node.onResize;

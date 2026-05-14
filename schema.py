@@ -169,7 +169,8 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
             warnings.append("Ignored malformed folder entry.")
             continue
         folder_id = _unique_id(item.get("id"), "folder", used_folder_ids)
-        name = _as_text(item.get("name"), "Folder").strip() or "Folder"
+        raw_name = _as_text(item.get("name"), "Folder")
+        name = raw_name if raw_name.strip() else "Folder"
         folders.append({"id": folder_id, "name": name})
 
     folder_ids = {folder["id"] for folder in folders}
@@ -188,7 +189,9 @@ def normalize_state(data: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]
         prompts.append(
             {
                 "id": prompt_id,
-                "title": _as_text(item.get("title"), "Untitled prompt").strip() or "Untitled prompt",
+                "title": _as_text(item.get("title"), "Untitled prompt")
+                if _as_text(item.get("title"), "Untitled prompt").strip()
+                else "Untitled prompt",
                 "text": _as_text(item.get("text")),
                 "description": _as_text(item.get("description")),
                 "folderId": folder_id,
