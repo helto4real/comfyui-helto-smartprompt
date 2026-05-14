@@ -21,6 +21,25 @@ const PANEL_DEFAULT_WIDTH = 520;
 const PANEL_MIN_HEIGHT = 340;
 const PANEL_DEFAULT_HEIGHT = 500;
 const NODE_CHROME_HEIGHT = 220;
+const ICON_PATHS = {
+  add: "M12 5v14M5 12h14",
+  check: "M20 6 9 17l-5-5",
+  close: "M18 6 6 18M6 6l12 12",
+  copy: "M8 8h10v10H8zM6 16H4V4h10v2",
+  delete: "M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v6M14 10v6",
+  duplicate: "M8 8h10v10H8zM6 16H4V4h10v2",
+  export: "M12 3v12M7 8l5-5 5 5M5 21h14",
+  folder: "M3 6h7l2 2h9v10H3z",
+  importMerge: "M12 21V9M7 14l5 5 5-5M4 5h7l2 2h7",
+  importReplace: "M12 21V9M7 14l5 5 5-5M6 5h12",
+  json: "M9 5H6v14h3M15 5h3v14h-3",
+  paste: "M9 5h6M9 3h6v4H9zM7 5H5v16h14V5h-2",
+  prompts: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5",
+  reroll: "M4 4v6h6M20 20v-6h-6M20 9a7 7 0 0 0-12-4L4 10M4 15a7 7 0 0 0 12 4l4-5",
+  select: "M8 12h8M13 7l5 5-5 5",
+  selected: "M20 6 9 17l-5-5",
+  variable: "M8 4c-2 3-2 13 0 16M16 4c2 3 2 13 0 16M10 9h4M10 15h4",
+};
 
 function nowIso() {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -38,6 +57,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function iconSvg(name) {
+  const path = ICON_PATHS[name] || ICON_PATHS.check;
+  return `<svg class="spm-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"></path></svg>`;
+}
+
+function iconButton(icon, label, attrs = "", className = "") {
+  return `<button class="spm-btn ${className}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${attrs}>${iconSvg(icon)}<span class="spm-sr-only">${escapeHtml(label)}</span></button>`;
 }
 
 function stableHash(text) {
@@ -419,8 +447,9 @@ function injectStyles() {
     .spm-row{display:flex;gap:6px;align-items:center;margin:5px 0}.spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:5px 0}
     .spm-root input,.spm-root textarea,.spm-root select{background:var(--spm-field-bg,#202020);color:var(--spm-text,#f0f0f0);border:1px solid var(--spm-border,#5a5a5a);border-radius:4px;padding:4px;font:12px system-ui, sans-serif;box-sizing:border-box}
     .spm-root textarea{width:100%;resize:vertical;min-height:54px}.spm-root input[type=text],.spm-root select{min-width:0}
-    .spm-btn{background:var(--spm-button-bg,#3a3a3a);color:var(--spm-text,#f5f5f5);border:1px solid var(--spm-border,#666);border-radius:4px;padding:4px 7px;cursor:pointer;font:12px system-ui, sans-serif;white-space:nowrap}
+    .spm-btn{background:var(--spm-button-bg,#3a3a3a);color:var(--spm-text,#f5f5f5);border:1px solid var(--spm-border,#666);border-radius:4px;padding:0;cursor:pointer;font:12px system-ui, sans-serif;white-space:nowrap;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center}
     .spm-btn:hover{background:var(--spm-hover-bg,#494949)}.spm-btn-danger{border-color:#8b4a4a;color:#ffdada}.spm-btn-quiet{background:var(--spm-field-bg,#303030);color:var(--spm-muted,#dddddd)}
+    .spm-icon{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:block}.spm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
     .spm-section{border-top:1px solid var(--spm-border,rgba(255,255,255,.14));margin-top:8px;padding-top:7px}.spm-section summary{cursor:pointer;font-weight:700;color:var(--spm-text,#f4f4f4)}
     .spm-prompt-list{max-height:92px;overflow:auto;border:1px solid var(--spm-border,#565656);border-radius:4px;background:var(--spm-list-bg,#242424)}
     .spm-prompt-item{display:flex;align-items:center;gap:5px;padding:4px 6px;border-bottom:1px solid var(--spm-soft-border,#333);cursor:pointer}
@@ -915,16 +944,16 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Prompts${isDraft ? " · new draft" : ""}</div>
           <div class="spm-row-wrap">
-            <button class="spm-btn" data-dialog-action="save-close">Done</button>
-            <button class="spm-btn spm-btn-quiet" data-dialog-action="close">Close</button>
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
+            ${iconButton("close", "Close", 'data-dialog-action="close"', "spm-btn-quiet")}
           </div>
         </div>
         <div class="spm-row" style="align-items:stretch">
           <div style="width:260px;min-width:220px">
             <div class="spm-row-wrap">
-              <button class="spm-btn" data-dialog-action="add-prompt">Add</button>
-              <button class="spm-btn" data-dialog-action="duplicate-prompt">Duplicate</button>
-              <button class="spm-btn spm-btn-danger" data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}>Delete</button>
+              ${iconButton("add", "Add prompt", 'data-dialog-action="add-prompt"')}
+              ${iconButton("duplicate", "Duplicate prompt", 'data-dialog-action="duplicate-prompt"')}
+              ${iconButton("delete", "Delete prompt", `data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}`, "spm-btn-danger")}
             </div>
             <select data-dialog-folder-filter style="width:100%;margin:4px 0 6px">${filterOptions}</select>
             <input type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts" style="width:100%;margin:4px 0 6px">
@@ -939,15 +968,15 @@ function enhanceNode(node) {
               <div class="spm-modal-field"><label>Tags</label><input type="text" data-dialog-prompt-field="tags" value="${escapeHtml(tagsForInput(prompt.tags))}" placeholder="portrait, cinematic" ${prompt.locked ? "disabled" : ""}></div>
             </div>
             <div class="spm-row-wrap">
-              <label><input type="checkbox" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
-              <label><input type="checkbox" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
-              <label><input type="checkbox" data-dialog-prompt-bool="hidden" ${prompt.hidden ? "checked" : ""}> Hidden preview</label>
+              <label title="Mark this prompt as a favorite"><input type="checkbox" title="Mark this prompt as a favorite" data-dialog-prompt-bool="favorite" ${prompt.favorite ? "checked" : ""}> Favorite</label>
+              <label title="Lock this prompt to prevent accidental edits"><input type="checkbox" title="Lock this prompt to prevent accidental edits" data-dialog-prompt-bool="locked" ${prompt.locked ? "checked" : ""}> Locked</label>
+              <label title="Hide this prompt preview until the node is hovered"><input type="checkbox" title="Hide this prompt preview until the node is hovered" data-dialog-prompt-bool="hidden" ${prompt.hidden ? "checked" : ""}> Hidden preview</label>
             </div>
             <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
             <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
             <div class="spm-row-wrap">
-              <button class="spm-btn" data-dialog-action="copy-resolved">Copy resolved</button>
-              <button class="spm-btn" data-dialog-action="copy-prompt-json">Copy prompt JSON</button>
+              ${iconButton("copy", "Copy resolved prompt", 'data-dialog-action="copy-resolved"')}
+              ${iconButton("json", "Copy prompt JSON", 'data-dialog-action="copy-prompt-json"')}
             </div>
             <div class="spm-mini">Highlighted preview</div>
             <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "", resolution)}</div>
@@ -1115,7 +1144,7 @@ function enhanceNode(node) {
             <input data-var-fixed="${escapeHtml(name)}" value="${escapeHtml(definition.fixedValue || "")}">
             <input data-var-fallback="${escapeHtml(name)}" value="${escapeHtml(definition.fallback || "")}">
             <input data-var-description="${escapeHtml(name)}" value="${escapeHtml(definition.description || "")}">
-            <button class="spm-btn spm-btn-danger" data-dialog-action="remove-variable" data-var="${escapeHtml(name)}">×</button>
+            ${iconButton("delete", "Remove variable", `data-dialog-action="remove-variable" data-var="${escapeHtml(name)}"`, "spm-btn-danger")}
           </div>`,
         )
         .join("");
@@ -1123,8 +1152,8 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Variables</div>
           <div class="spm-row-wrap">
-            <button class="spm-btn" data-dialog-action="add-variable">Add variable</button>
-            <button class="spm-btn" data-dialog-action="save-close">Done</button>
+            ${iconButton("add", "Add variable", 'data-dialog-action="add-variable"')}
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
           </div>
         </div>
         <div class="spm-modal-grid spm-grid-head"><span>Name</span><span>Mode</span><span>Values</span><span>Fixed</span><span>Fallback</span><span>Description</span><span></span></div>
@@ -1212,11 +1241,11 @@ function enhanceNode(node) {
         .map((folder) => {
           const count = state.prompts.filter((prompt) => prompt.folderId === folder.id).length;
           return `<div class="spm-row" data-folder-row="${escapeHtml(folder.id)}">
-            <button class="spm-btn spm-btn-quiet" data-dialog-folder-select="${escapeHtml(folder.id)}">${state.selectedFolderId === folder.id ? "Selected" : "Select"}</button>
+            ${iconButton(state.selectedFolderId === folder.id ? "selected" : "select", state.selectedFolderId === folder.id ? "Selected folder" : "Select folder", `data-dialog-folder-select="${escapeHtml(folder.id)}"`, "spm-btn-quiet")}
             <input type="text" data-dialog-folder-name="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" style="flex:1">
-            <label class="spm-mini"><input type="checkbox" data-dialog-folder-hidden="${escapeHtml(folder.id)}" ${folder.hidden ? "checked" : ""}> Hidden</label>
+            <label class="spm-mini" title="Hide previews for prompts in this folder until the node is hovered"><input type="checkbox" title="Hide previews for prompts in this folder until the node is hovered" data-dialog-folder-hidden="${escapeHtml(folder.id)}" ${folder.hidden ? "checked" : ""}> Hidden</label>
             <span class="spm-mini">${count} prompts</span>
-            <button class="spm-btn spm-btn-danger" data-dialog-action="delete-folder" data-folder="${escapeHtml(folder.id)}">Delete</button>
+            ${iconButton("delete", "Delete folder", `data-dialog-action="delete-folder" data-folder="${escapeHtml(folder.id)}"`, "spm-btn-danger")}
           </div>`;
         })
         .join("");
@@ -1224,8 +1253,8 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Folders</div>
           <div class="spm-row-wrap">
-            <button class="spm-btn" data-dialog-action="add-folder">Add folder</button>
-            <button class="spm-btn" data-dialog-action="save-close">Done</button>
+            ${iconButton("add", "Add folder", 'data-dialog-action="add-folder"')}
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
           </div>
         </div>
         <div class="spm-mini">Filter folders</div>
@@ -1330,10 +1359,10 @@ function enhanceNode(node) {
       .join("");
     root.innerHTML = `
       <div class="spm-row-wrap">
-        <button class="spm-btn" data-action="open-prompt-editor">Edit prompts</button>
-        <button class="spm-btn" data-action="open-folders-editor">Edit folders</button>
-        <button class="spm-btn" data-action="open-variables-editor">Edit variables</button>
-        <button class="spm-btn" data-action="reroll">Reroll</button>
+        ${iconButton("prompts", "Edit prompts", 'data-action="open-prompt-editor"')}
+        ${iconButton("folder", "Edit folders", 'data-action="open-folders-editor"')}
+        ${iconButton("variable", "Edit variables", 'data-action="open-variables-editor"')}
+        ${iconButton("reroll", "Reroll variables", 'data-action="reroll"')}
         <span class="spm-muted">${escapeHtml(status)}</span>
       </div>
       <details class="spm-section" open><summary>Prompt Library</summary>
@@ -1350,11 +1379,11 @@ function enhanceNode(node) {
           ${prompt?.description && revealSelectedPreview ? `<div class="spm-muted">${escapeHtml(prompt.description)}</div>` : ""}
         </div>
         <div class="spm-row-wrap">
-          <label><input type="checkbox" data-prompt-bool="favorite" ${prompt?.favorite ? "checked" : ""}> Favorite</label>
-          <label><input type="checkbox" data-prompt-bool="locked" ${prompt?.locked ? "checked" : ""}> Locked</label>
-          <label><input type="checkbox" data-prompt-bool="hidden" ${prompt?.hidden ? "checked" : ""}> Hidden preview</label>
-          <button class="spm-btn" data-action="copy-resolved">Copy resolved</button>
-          <button class="spm-btn" data-action="copy-prompt-json">Copy prompt JSON</button>
+          <label title="Mark this prompt as a favorite"><input type="checkbox" title="Mark this prompt as a favorite" data-prompt-bool="favorite" ${prompt?.favorite ? "checked" : ""}> Favorite</label>
+          <label title="Lock this prompt to prevent accidental edits"><input type="checkbox" title="Lock this prompt to prevent accidental edits" data-prompt-bool="locked" ${prompt?.locked ? "checked" : ""}> Locked</label>
+          <label title="Hide this prompt preview until the node is hovered"><input type="checkbox" title="Hide this prompt preview until the node is hovered" data-prompt-bool="hidden" ${prompt?.hidden ? "checked" : ""}> Hidden preview</label>
+          ${iconButton("copy", "Copy resolved prompt", 'data-action="copy-resolved"')}
+          ${iconButton("json", "Copy prompt JSON", 'data-action="copy-prompt-json"')}
         </div>
         <div class="spm-mini">Highlighted preview</div>
         <div class="spm-preview">${revealSelectedPreview ? renderPreview(prompt?.text || "", resolution) : previewPlaceholder}</div>
@@ -1363,10 +1392,10 @@ function enhanceNode(node) {
       </details>
       <details class="spm-section"><summary>Import / Export</summary>
         <div class="spm-row-wrap">
-          <button class="spm-btn" data-action="export-library">Export library</button>
-          <button class="spm-btn" data-action="import-merge">Import merge</button>
-          <button class="spm-btn" data-action="import-replace">Import replace</button>
-          <button class="spm-btn" data-action="paste-prompt-json">Paste prompt JSON</button>
+          ${iconButton("export", "Export library", 'data-action="export-library"')}
+          ${iconButton("importMerge", "Import and merge library", 'data-action="import-merge"')}
+          ${iconButton("importReplace", "Import and replace library", 'data-action="import-replace"')}
+          ${iconButton("paste", "Paste prompt JSON", 'data-action="paste-prompt-json"')}
         </div>
         <textarea class="spm-copybox" data-role="json-box" placeholder="Import/export/copy fallback JSON"></textarea>
       </details>

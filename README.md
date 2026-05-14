@@ -1,8 +1,8 @@
 # ComfyUI Helto Prompts
 
-`Smart Prompt Manager` is a ComfyUI custom node for reusable prompts with per-node prompt libraries, folders, search, deterministic randomized variables, copy/paste portability, import/export, and a practical visual editor.
+`Smart Prompt Manager` is a ComfyUI custom node for reusable prompts with per-node prompt libraries, folders, search, deterministic randomized variables, copy/paste portability, import/export, hidden/private previews, and a practical visual editor.
 
-The first version deliberately uses a robust hybrid editor: a normal textarea for editing, a highlighted preview below it, hover previews for variables, and autocomplete attached to the textarea.
+The node uses a robust hybrid editor instead of a fragile rich text editor: a normal textarea for editing, a highlighted preview below it, hover previews for variables, and autocomplete attached to the textarea. Prompt, folder, and variable editing now happens in popup windows so the node itself can stay compact.
 
 ## Installation
 
@@ -30,9 +30,36 @@ The node returns standard ComfyUI strings:
 - `selected_values_json`: the selected value for each variable in the current generation
 - `warnings_json`: missing variables, variables used, and warnings
 
-## Creating Prompts
+## UI Overview
 
-Use the **Prompt Library** section to add, duplicate, delete, and select prompts. Each prompt stores:
+The main node shows a compact prompt library, the selected prompt summary, highlighted/resolved previews, import/export, and validation warnings.
+
+The top row uses icon buttons. Hover an icon to see its tooltip:
+
+- edit prompts
+- edit folders
+- edit variables
+- reroll variables
+
+Checkboxes also have tooltips. The visible labels are kept for readability, while the tooltip gives the exact behavior.
+
+## Creating And Editing Prompts
+
+Use the **Edit prompts** icon button to open the prompt editor window. In that window you can:
+
+- add a new prompt
+- duplicate the current prompt
+- delete a prompt
+- select an existing prompt
+- edit title, folder, tags, description, and prompt text
+- mark a prompt as favorite, locked, or hidden
+- copy the resolved prompt or prompt JSON
+
+When you add a new prompt, it starts as a draft. It is only added to the library and selected when you press **Done**. **Close** discards an unsaved draft.
+
+The edit prompt window includes a folder filter above search. New prompts use the selected real folder as their default folder, or **Unsorted** when that filter is selected. The prompt list also has hover previews showing prompt text, variables, resolved preview, and warnings.
+
+Each prompt stores:
 
 - title
 - prompt text
@@ -41,6 +68,7 @@ Use the **Prompt Library** section to add, duplicate, delete, and select prompts
 - tags
 - favorite flag
 - lock flag
+- hidden preview flag
 - created and updated timestamps
 
 Prompt state is saved inside the node's `spm_data` widget, so two node instances can have completely different libraries and both survive workflow save/load.
@@ -82,17 +110,21 @@ Supported modes:
 
 Repeated uses of the same variable in one prompt resolve to the same value. Missing variables keep the original `{{token}}` and produce a warning instead of crashing.
 
+Use the **Edit variables** icon button to open the variable editor window. Variable rows include name, mode, values, fixed value, fallback, description, and a remove icon.
+
 ## Seed And Reroll
 
 `seed` and `reroll` are normal node inputs/widgets.
 
 - Same prompt, variables, seed, and reroll produce the same `resolved_prompt`.
-- Change `reroll` or press **Reroll** to get a different random selection.
+- Change `reroll` or press the **Reroll variables** icon to get a different random selection.
 - Fixed variables ignore random seed and reroll.
 
 ## Folders And Search
 
-Folders have stable IDs and editable names. Deleting a folder moves prompts to **Unsorted**. Prompts and folders can also be marked hidden, which hides the selected prompt preview in the node until the mouse is hovering over the node.
+Use the **Edit folders** icon button to open the folder editor window. Folders have stable IDs and editable names. Deleting a folder moves prompts to **Unsorted**.
+
+Folders can be marked hidden. When a folder is hidden, prompts in that folder have their titles, folder labels, prompt previews, and resolved previews masked in the main node until the mouse is hovering over the node.
 
 Virtual folders:
 
@@ -100,7 +132,22 @@ Virtual folders:
 - `Unsorted`
 - `Favorites`
 
-Search is live and case-insensitive. It checks prompt title, text, folder name, tags, and description. Search applies inside the selected folder, or globally when `All` is selected.
+Search is live and case-insensitive. It checks prompt title, text, folder name, tags, and description. Search applies inside the selected folder, or globally when `All` is selected. The edit prompt window has its own folder filter and search input for finding prompts to edit in long libraries.
+
+## Hidden Previews
+
+Prompts and folders can be marked hidden.
+
+When a prompt is hidden, or when it belongs to a hidden folder, the main node masks:
+
+- selected prompt title
+- selected folder/tag summary
+- highlighted raw prompt preview
+- resolved prompt preview
+- prompt titles and folder labels in the main prompt list
+- prompt-list hover preview text while the node is not hovered
+
+Hover over the node to reveal the hidden information. The prompt editor popup still shows the prompt normally because opening it is an explicit edit action.
 
 ## Editor, Highlighting, And IntelliSense
 
@@ -123,9 +170,9 @@ The shortcut definitions live near the top of `web/js/smart_prompt_manager.js` s
 
 ## Copy And Paste
 
-Buttons in the editor support:
+Icon buttons in the node and editor support:
 
-- **Copy resolved**: copies only the current resolved prompt as plain text
+- **Copy resolved prompt**: copies only the current resolved prompt as plain text
 - **Copy prompt JSON**: copies the selected prompt plus required variable definitions
 - **Paste prompt JSON**: imports copied prompt JSON into the current node instance
 
