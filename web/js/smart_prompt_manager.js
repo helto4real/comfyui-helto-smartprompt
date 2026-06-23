@@ -68,6 +68,11 @@ function iconButton(icon, label, attrs = "", className = "") {
   return `<button class="spm-btn ${className}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" ${attrs}>${iconSvg(icon)}<span class="spm-sr-only">${escapeHtml(label)}</span></button>`;
 }
 
+function privacySwitch({ checked = false, disabled = false } = {}) {
+  const title = "Encrypt prompt library JSON in saved workflows";
+  return `<label class="spm-privacy-toggle" title="${title}"><span>Privacy mode</span><span class="spm-switch"><input type="checkbox" aria-label="Privacy mode" title="${title}" data-privacy-mode ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}><span class="spm-switch-slider"></span></span></label>`;
+}
+
 function stableHash(text) {
   let value = 2166136261;
   for (let i = 0; i < text.length; i += 1) {
@@ -413,87 +418,125 @@ function isEditableField(target) {
   return Boolean(target?.closest?.("input, textarea, select, button"));
 }
 
-function parseCssColor(value) {
-  const text = String(value || "").trim();
-  if (!text) return null;
-  const hex = text.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
-  if (hex) {
-    let raw = hex[1];
-    if (raw.length === 3) raw = raw.split("").map((char) => char + char).join("");
-    return {
-      r: Number.parseInt(raw.slice(0, 2), 16),
-      g: Number.parseInt(raw.slice(2, 4), 16),
-      b: Number.parseInt(raw.slice(4, 6), 16),
-    };
-  }
-  const rgb = text.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-  if (rgb) {
-    return {
-      r: Number.parseInt(rgb[1], 10),
-      g: Number.parseInt(rgb[2], 10),
-      b: Number.parseInt(rgb[3], 10),
-    };
-  }
-  return null;
-}
-
-function clampColor(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
-}
-
-function colorToRgb(color) {
-  return `rgb(${clampColor(color.r)}, ${clampColor(color.g)}, ${clampColor(color.b)})`;
-}
-
-function mixColor(a, b, amount) {
-  return {
-    r: a.r + (b.r - a.r) * amount,
-    g: a.g + (b.g - a.g) * amount,
-    b: a.b + (b.b - a.b) * amount,
-  };
-}
-
-function relativeLuminance(color) {
-  const convert = (channel) => {
-    const value = channel / 255;
-    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * convert(color.r) + 0.7152 * convert(color.g) + 0.0722 * convert(color.b);
-}
-
 function injectStyles() {
   if (document.getElementById("spm-styles")) return;
   const style = document.createElement("style");
   style.id = "spm-styles";
   style.textContent = `
-    .spm-root{font:12px system-ui, sans-serif;color:var(--spm-text,#eeeeee);background:var(--spm-root-bg,transparent);border:1px solid var(--spm-border,rgba(255,255,255,.12));border-radius:6px;padding:8px;width:100%;height:100%;overflow:auto;box-sizing:border-box;overscroll-behavior:contain}
-    .spm-row{display:flex;gap:6px;align-items:center;margin:5px 0}.spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:5px 0}
-    .spm-root input,.spm-root textarea,.spm-root select{background:var(--spm-field-bg,#202020);color:var(--spm-text,#f0f0f0);border:1px solid var(--spm-border,#5a5a5a);border-radius:4px;padding:4px;font:12px system-ui, sans-serif;box-sizing:border-box}
-    .spm-root textarea{width:100%;resize:vertical;min-height:54px}.spm-root input[type=text],.spm-root select{min-width:0}
-    .spm-btn{background:var(--spm-button-bg,#3a3a3a);color:var(--spm-text,#f5f5f5);border:1px solid var(--spm-border,#666);border-radius:4px;padding:0;cursor:pointer;font:12px system-ui, sans-serif;white-space:nowrap;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center}
-    .spm-btn:hover{background:var(--spm-hover-bg,#494949)}.spm-btn-danger{border-color:#8b4a4a;color:#ffdada}.spm-btn-quiet{background:var(--spm-field-bg,#303030);color:var(--spm-muted,#dddddd)}
-    .spm-icon{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:block}.spm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-    .spm-toolbar{min-height:28px}.spm-privacy-toggle{height:26px;display:inline-flex;align-items:center;gap:6px;margin:0 2px;color:var(--spm-text,#f5f5f5);line-height:1}.spm-privacy-toggle input[type=checkbox]{width:18px;height:18px;margin:0;padding:0;flex:0 0 auto}.spm-privacy-toggle span{white-space:nowrap}
-    .spm-section{border-top:1px solid var(--spm-border,rgba(255,255,255,.14));margin-top:8px;padding-top:7px}.spm-section summary{cursor:pointer;font-weight:700;color:var(--spm-text,#f4f4f4)}
-    .spm-prompt-list{max-height:92px;overflow:auto;border:1px solid var(--spm-border,#565656);border-radius:4px;background:var(--spm-list-bg,#242424)}
-    .spm-prompt-item{display:flex;align-items:center;gap:5px;padding:4px 6px;border-bottom:1px solid var(--spm-soft-border,#333);cursor:pointer}
-    .spm-prompt-item:last-child{border-bottom:0}.spm-prompt-item.is-selected{background:var(--spm-selected-bg,#555)}.spm-prompt-item:hover{background:var(--spm-hover-bg,#444)}
-    .spm-prompt-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.spm-muted{color:var(--spm-muted,#b8b8b8)}.spm-mini{font-size:11px;color:var(--spm-muted,#c8c8c8)}
-    .spm-preview{white-space:pre-wrap;line-height:1.45;background:var(--spm-field-bg,#202020);border:1px solid var(--spm-border,#555);border-radius:4px;padding:6px;min-height:28px;max-height:76px;overflow:auto}
-    .spm-var{background:var(--spm-selected-bg,#4a4a4a);color:var(--spm-text,#f5f5f5);border:1px solid var(--spm-strong-border,#8a8a8a);border-radius:3px;padding:0 2px}.spm-var-warn{background:#573235;color:#ffdada;border-color:#9a575d}
-    .spm-grid{display:grid;grid-template-columns:1fr 76px 1.2fr 1fr 1fr 1.2fr 26px;gap:4px;align-items:start}.spm-grid-head{font-weight:700;color:var(--spm-muted,#dddddd)}
-    .spm-grid textarea{min-height:34px}.spm-warn{background:#382f16;border:1px solid #856a22;color:#ffe5a3;border-radius:4px;padding:5px;margin-top:5px}
-    .spm-autocomplete{position:absolute;z-index:10000;background:var(--spm-list-bg,#222);border:1px solid var(--spm-strong-border,#707070);border-radius:4px;box-shadow:0 8px 22px rgba(0,0,0,.35);max-height:150px;overflow:auto;min-width:210px}
-    .spm-suggestion{display:flex;gap:8px;justify-content:space-between;padding:5px 7px;cursor:pointer}.spm-suggestion.is-active{background:var(--spm-selected-bg,#555)}.spm-suggestion-name{font-weight:700;color:var(--spm-text,#ffffff)}
-    .spm-copybox{width:100%;min-height:54px}.spm-tooltip{position:absolute;z-index:10001;max-width:320px;background:var(--spm-list-bg,#222);border:1px solid var(--spm-strong-border,#707070);border-radius:5px;padding:7px;color:var(--spm-text,#f5f5f5);box-shadow:0 8px 24px rgba(0,0,0,.4);pointer-events:none}
-    .spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
-    .spm-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--spm-panel-bg,#2b2b2b);color:var(--spm-text,#eeeeee);border:1px solid var(--spm-strong-border,#707070);border-radius:8px;box-shadow:0 22px 70px rgba(0,0,0,.55);padding:12px;box-sizing:border-box;font:13px system-ui,sans-serif}
-    .spm-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--spm-border,#555);padding-bottom:8px;margin-bottom:10px}.spm-modal-title{font-weight:700;font-size:15px}
-    .spm-modal input,.spm-modal textarea,.spm-modal select{background:var(--spm-field-bg,#202020);color:var(--spm-text,#f0f0f0);border:1px solid var(--spm-border,#5a5a5a);border-radius:4px;padding:6px;font:13px system-ui,sans-serif;box-sizing:border-box}
-    .spm-modal textarea{width:100%;resize:vertical}.spm-dialog-editor{min-height:220px}.spm-dialog-description{min-height:70px}
-    .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:7px 0}.spm-modal .spm-preview{max-height:170px}.spm-modal-field{display:flex;flex-direction:column;gap:4px;flex:1}.spm-modal-field label{font-size:11px;color:var(--spm-muted,#c8c8c8)}
-    .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:5px;align-items:start}.spm-modal-grid textarea{min-height:54px}
-    .spm-node-summary{background:var(--spm-field-bg,#202020);border:1px solid var(--spm-border,#555);border-radius:4px;padding:6px;line-height:1.35}.spm-node-summary-title{font-weight:700;color:var(--spm-text,#f5f5f5);overflow-wrap:anywhere}
+    /* ---- Helto Design System tokens (inlined :root, canonical values) ---- */
+    :root{
+      --helto-bg:#0d1320;--helto-surface:#151c2a;--helto-surface-2:#1b2333;--helto-surface-3:#232d3f;--helto-surface-hover:#2c3850;
+      --helto-border:#2a3346;--helto-border-strong:#3a465c;--helto-border-hover:#4c5970;
+      --helto-text:#e7ebf3;--helto-text-dim:#9aa6bd;--helto-text-faint:#6f7c95;
+      --helto-accent:#f1c75c;--helto-accent-strong:#ffd873;--helto-accent-bg:rgba(241,199,92,.16);--helto-accent-border:rgba(241,199,92,.55);
+      --helto-focus:#5e9bff;--helto-focus-ring:0 0 0 2px rgba(94,155,255,.5);
+      --helto-danger:#ec5a6b;--helto-danger-bg:#3a1a22;--helto-danger-border:#8f3a44;
+      --helto-warn:#ffe3a3;
+      --helto-radius-sm:5px;--helto-radius:6px;--helto-radius-lg:10px;
+      --helto-font-sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      --helto-font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Roboto Mono",monospace;
+      --helto-shadow:0 1px 2px rgba(0,0,0,.35);--helto-shadow-pop:0 14px 36px rgba(0,0,0,.55);--helto-shadow-glow:0 0 10px rgba(241,199,92,.35);
+      --helto-transition:.12s ease;--helto-ease-spring:cubic-bezier(.34,1.56,.64,1);
+    }
+
+    /* ---- Root / layout ---- */
+    .spm-root{font:12px/1.4 var(--helto-font-sans);color:var(--helto-text);background:var(--helto-surface);border:1px solid var(--helto-border);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow);padding:9px;width:100%;height:100%;overflow:auto;box-sizing:border-box;overscroll-behavior:contain;-webkit-font-smoothing:antialiased}
+    .spm-root *,.spm-root *::before,.spm-root *::after{box-sizing:border-box}
+    .spm-row{display:flex;gap:6px;align-items:center;margin:6px 0}.spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+    .spm-spacer{flex:1 1 auto}
+
+    /* ---- Inputs ---- */
+    .spm-root input,.spm-root textarea,.spm-root select{background:var(--helto-surface-2);color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:5px 8px;font:inherit;box-sizing:border-box;transition:border-color var(--helto-transition),box-shadow var(--helto-transition)}
+    .spm-root textarea{width:100%;resize:vertical;min-height:54px;line-height:1.4}.spm-root input[type=text],.spm-root select{min-width:0}
+    .spm-root select{cursor:pointer}
+    .spm-root input::placeholder,.spm-root textarea::placeholder{color:var(--helto-text-faint)}
+    .spm-root input:focus,.spm-root textarea:focus,.spm-root select:focus,.spm-modal input:focus,.spm-modal textarea:focus,.spm-modal select:focus,.spm-btn:focus-visible{outline:none;border-color:var(--helto-focus);box-shadow:var(--helto-focus-ring)}
+
+    /* ---- Buttons (icon-only, raised gradient; gold=active/primary, red=danger) ---- */
+    .spm-btn{background:linear-gradient(180deg,var(--helto-surface-3),var(--helto-surface-2));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:0;cursor:pointer;font:inherit;white-space:nowrap;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;transition:background var(--helto-transition),border-color var(--helto-transition),color var(--helto-transition),box-shadow var(--helto-transition),transform .03s ease}
+    .spm-btn:hover{background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));border-color:var(--helto-border-hover);color:#fff}
+    .spm-btn:active{transform:translateY(1px)}.spm-btn:disabled{opacity:.4;cursor:not-allowed}
+    .spm-btn-primary{border-color:var(--helto-accent-border);background:linear-gradient(180deg,#4f4322,#3c3318);color:var(--helto-accent-strong)}
+    .spm-btn-primary:hover{background:linear-gradient(180deg,#5b4d27,#46391b);color:#fff3cf}
+    .spm-btn-danger{border-color:var(--helto-danger-border);background:linear-gradient(180deg,#5a2330,#471b25);color:#ffd6dc}
+    .spm-btn-danger:hover{border-color:#d0505f;background:linear-gradient(180deg,#6e2937,#57212c);color:#fff3f5}
+    .spm-btn-quiet{background:linear-gradient(180deg,var(--helto-surface-2),var(--helto-surface));color:var(--helto-text-dim)}
+    .spm-btn-quiet:hover{background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));color:#fff}
+    .spm-icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;display:block}
+    .spm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+    /* ---- Toolbar ---- */
+    .spm-toolbar{min-height:34px;padding:5px;border-radius:var(--helto-radius);background:linear-gradient(180deg,var(--helto-surface-2),var(--helto-surface));box-shadow:inset 0 0 0 1px var(--helto-border)}
+
+    /* ---- Toggle switch (privacy) ---- */
+    .spm-privacy-toggle{display:inline-flex;align-items:center;gap:8px;margin:0 2px 0 auto;color:var(--helto-text-faint);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;line-height:1}
+    .spm-switch{position:relative;display:inline-block;width:36px;height:20px;flex:0 0 auto}
+    .spm-switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
+    .spm-switch-slider{position:absolute;inset:0;border-radius:20px;background:var(--helto-surface-2);border:1px solid var(--helto-border-strong);cursor:pointer;transition:.25s ease}
+    .spm-switch-slider::before{content:"";position:absolute;left:3px;bottom:3px;width:12px;height:12px;border-radius:50%;background:var(--helto-text-dim);transition:.25s ease}
+    .spm-switch input:checked+.spm-switch-slider{background:var(--helto-accent-bg);border-color:var(--helto-accent-border)}
+    .spm-switch input:checked+.spm-switch-slider::before{transform:translateX(16px);background:var(--helto-accent)}
+    .spm-switch input:focus-visible+.spm-switch-slider{box-shadow:var(--helto-focus-ring)}
+    .spm-switch input:disabled+.spm-switch-slider{opacity:.5;cursor:not-allowed}
+
+    /* ---- Sections ---- */
+    .spm-section{border-top:1px solid var(--helto-border);margin-top:9px;padding-top:8px}
+    .spm-section summary{cursor:pointer;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--helto-text);list-style:none;display:flex;align-items:center;gap:6px}
+    .spm-section summary::-webkit-details-marker{display:none}
+    .spm-section summary::before{content:"";width:0;height:0;border-left:5px solid var(--helto-text-faint);border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform var(--helto-transition)}
+    .spm-section[open] summary::before{transform:rotate(90deg)}
+    .spm-section summary:hover{color:var(--helto-accent-strong)}
+
+    /* ---- Prompt list (inset well; selected=gold) ---- */
+    .spm-prompt-list{max-height:96px;overflow:auto;border:1px solid var(--helto-border);border-radius:var(--helto-radius);background:var(--helto-bg);box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+    .spm-prompt-item{display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid var(--helto-border);cursor:pointer;color:var(--helto-text);transition:background var(--helto-transition),color var(--helto-transition)}
+    .spm-prompt-item:last-child{border-bottom:0}
+    .spm-prompt-item:hover{background:var(--helto-surface-hover);color:#fff}
+    .spm-prompt-item.is-selected{background:var(--helto-accent-bg);color:var(--helto-accent-strong);box-shadow:inset 2px 0 0 var(--helto-accent)}
+    .spm-prompt-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .spm-muted{color:var(--helto-text-dim)}.spm-mini{font-size:11px;color:var(--helto-text-faint)}
+
+    /* ---- Preview wells ---- */
+    .spm-preview{white-space:pre-wrap;line-height:1.45;font-family:var(--helto-font-mono);background:var(--helto-bg);border:1px solid var(--helto-border);border-radius:var(--helto-radius-sm);padding:7px 9px;min-height:28px;max-height:76px;overflow:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+    .spm-var{background:var(--helto-accent-bg);color:var(--helto-accent-strong);border:1px solid var(--helto-accent-border);border-radius:var(--helto-radius-sm);padding:0 3px}
+    .spm-var-warn{background:var(--helto-danger-bg);color:#ffd6dc;border-color:var(--helto-danger-border)}
+
+    /* ---- Grids / warnings ---- */
+    .spm-grid{display:grid;grid-template-columns:1fr 76px 1.2fr 1fr 1fr 1.2fr 28px;gap:5px;align-items:start}.spm-grid-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
+    .spm-grid textarea{min-height:34px}
+    .spm-warn{background:#332711;border:1px solid #7a5e28;color:var(--helto-warn);border-radius:var(--helto-radius);padding:7px 10px;margin-top:6px}
+
+    /* ---- Autocomplete / tooltip (pop surfaces) ---- */
+    .spm-autocomplete{position:absolute;z-index:10000;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow-pop);max-height:150px;overflow:auto;min-width:210px;padding:5px;animation:spm-pop .15s var(--helto-ease-spring)}
+    .spm-suggestion{display:flex;gap:8px;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:var(--helto-radius-sm);cursor:pointer;color:var(--helto-text)}
+    .spm-suggestion:hover{background:var(--helto-surface-hover);color:#fff}
+    .spm-suggestion.is-active{background:var(--helto-surface-hover);color:#fff;box-shadow:inset 2px 0 0 var(--helto-accent)}
+    .spm-suggestion-name{font-weight:600;color:inherit}
+    .spm-copybox{width:100%;min-height:54px;font-family:var(--helto-font-mono)}
+    .spm-tooltip{position:absolute;z-index:10001;max-width:320px;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);padding:8px 10px;color:var(--helto-text);box-shadow:var(--helto-shadow-pop);pointer-events:none;font:12px/1.4 var(--helto-font-sans)}
+    @keyframes spm-pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes spm-fade{from{opacity:0}to{opacity:1}}
+    @keyframes spm-rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+
+    /* ---- Modal / overlay ---- */
+    .spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(6,9,15,.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;animation:spm-fade .2s ease}
+    .spm-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:linear-gradient(135deg,rgba(27,35,51,.92),rgba(13,19,32,.96));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-lg);box-shadow:var(--helto-shadow-pop);backdrop-filter:blur(15px);padding:14px;box-sizing:border-box;font:13px/1.4 var(--helto-font-sans);animation:spm-rise .2s var(--helto-ease-spring)}
+    .spm-modal *,.spm-modal *::before,.spm-modal *::after{box-sizing:border-box}
+    .spm-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--helto-border);padding-bottom:10px;margin-bottom:12px}.spm-modal-title{font-weight:700;font-size:14px;letter-spacing:.02em}
+    .spm-modal input,.spm-modal textarea,.spm-modal select{background:var(--helto-surface-2);color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:6px 8px;font:inherit;box-sizing:border-box}
+    .spm-modal select{cursor:pointer}.spm-modal input::placeholder,.spm-modal textarea::placeholder{color:var(--helto-text-faint)}
+    .spm-modal textarea{width:100%;resize:vertical}.spm-dialog-editor{min-height:220px;font-family:var(--helto-font-mono)}.spm-dialog-description{min-height:70px}
+    .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:8px 0}.spm-modal .spm-preview{max-height:170px}
+    .spm-modal-field{display:flex;flex-direction:column;gap:5px;flex:1}.spm-modal-field label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
+    .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:6px;align-items:start}.spm-modal-grid textarea{min-height:54px}
+    .spm-node-summary{background:var(--helto-bg);border:1px solid var(--helto-border);border-radius:var(--helto-radius-sm);padding:7px 9px;line-height:1.35;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}.spm-node-summary-title{font-weight:600;color:var(--helto-text);overflow-wrap:anywhere}
+
+    /* ---- Thin scrollbars ---- */
+    .spm-root,.spm-modal,.spm-prompt-list,.spm-preview,.spm-autocomplete{scrollbar-width:thin;scrollbar-color:var(--helto-border-strong) transparent}
+    .spm-root::-webkit-scrollbar,.spm-modal::-webkit-scrollbar,.spm-prompt-list::-webkit-scrollbar,.spm-preview::-webkit-scrollbar,.spm-autocomplete::-webkit-scrollbar{width:6px;height:6px}
+    .spm-root::-webkit-scrollbar-track,.spm-modal::-webkit-scrollbar-track,.spm-prompt-list::-webkit-scrollbar-track,.spm-preview::-webkit-scrollbar-track,.spm-autocomplete::-webkit-scrollbar-track{background:transparent}
+    .spm-root::-webkit-scrollbar-thumb,.spm-modal::-webkit-scrollbar-thumb,.spm-prompt-list::-webkit-scrollbar-thumb,.spm-preview::-webkit-scrollbar-thumb,.spm-autocomplete::-webkit-scrollbar-thumb{background:var(--helto-border-strong);border-radius:3px}
+    .spm-root::-webkit-scrollbar-thumb:hover,.spm-modal::-webkit-scrollbar-thumb:hover,.spm-prompt-list::-webkit-scrollbar-thumb:hover,.spm-preview::-webkit-scrollbar-thumb:hover,.spm-autocomplete::-webkit-scrollbar-thumb:hover{background:var(--helto-text-faint)}
   `;
   document.head.appendChild(style);
 }
@@ -511,7 +554,7 @@ function enhanceNode(node) {
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
   let tooltip = null;
   let lastThemeKey = "";
-  let nodeHovering = false;
+  let previewRevealActive = false;
   let privacyLocked = Boolean(initialEncryptedValue);
   let privacyBusy = false;
   let encryptSequence = 0;
@@ -522,37 +565,10 @@ function enhanceNode(node) {
   const getSeed = () => Number.parseInt(seedWidget?.value || 0, 10) || 0;
   const getReroll = () => Number.parseInt(rerollWidget?.value || 0, 10) || 0;
 
-  function applyNodeTheme(element) {
-    if (!element) return;
-    const nodeBody = parseCssColor(node.bgcolor) || parseCssColor(node.color) || { r: 48, g: 48, b: 48 };
-    const nodeHeader = parseCssColor(node.color) || nodeBody;
-    const light = { r: 255, g: 255, b: 255 };
-    const dark = { r: 0, g: 0, b: 0 };
-    const isDark = relativeLuminance(nodeBody) < 0.45;
-    const text = isDark ? { r: 245, g: 245, b: 245 } : { r: 20, g: 20, b: 20 };
-    const muted = isDark ? mixColor(text, nodeBody, 0.38) : mixColor(text, nodeBody, 0.48);
-    const fieldBase = isDark ? mixColor(nodeBody, dark, 0.42) : mixColor(nodeBody, light, 0.42);
-    const panelBase = isDark ? mixColor(nodeBody, dark, 0.12) : mixColor(nodeBody, light, 0.12);
-    const listBase = isDark ? mixColor(nodeBody, dark, 0.28) : mixColor(nodeBody, light, 0.28);
-    const buttonBase = isDark ? mixColor(nodeBody, light, 0.12) : mixColor(nodeBody, dark, 0.12);
-    const hoverBase = isDark ? mixColor(nodeBody, light, 0.2) : mixColor(nodeBody, dark, 0.2);
-    const selectedBase = isDark ? mixColor(nodeBody, light, 0.3) : mixColor(nodeBody, dark, 0.3);
-    const borderBase = isDark ? mixColor(nodeBody, light, 0.26) : mixColor(nodeBody, dark, 0.26);
-    const strongBorder = isDark ? mixColor(nodeBody, light, 0.42) : mixColor(nodeBody, dark, 0.42);
-
-    element.style.setProperty("--spm-root-bg", "rgba(255,255,255,0.035)");
-    element.style.setProperty("--spm-panel-bg", colorToRgb(panelBase));
-    element.style.setProperty("--spm-list-bg", colorToRgb(listBase));
-    element.style.setProperty("--spm-field-bg", colorToRgb(fieldBase));
-    element.style.setProperty("--spm-button-bg", colorToRgb(buttonBase));
-    element.style.setProperty("--spm-hover-bg", colorToRgb(hoverBase));
-    element.style.setProperty("--spm-selected-bg", colorToRgb(selectedBase));
-    element.style.setProperty("--spm-border", colorToRgb(borderBase));
-    element.style.setProperty("--spm-soft-border", colorToRgb(mixColor(borderBase, nodeBody, 0.45)));
-    element.style.setProperty("--spm-strong-border", colorToRgb(strongBorder));
-    element.style.setProperty("--spm-text", colorToRgb(text));
-    element.style.setProperty("--spm-muted", colorToRgb(muted));
-    element.style.setProperty("--spm-node-header", colorToRgb(nodeHeader));
+  function applyNodeTheme() {
+    // The Helto design system uses a fixed dark-navy palette (see the inlined
+    // :root tokens in injectStyles), so the node colour no longer drives the UI.
+    // Kept as a no-op hook so theme-refresh callers stay valid.
   }
 
   function refreshNodeTheme(force = false) {
@@ -573,7 +589,12 @@ function enhanceNode(node) {
 
   function syncPanelSize() {
     refreshNodeTheme();
-    root.style.width = `${panelWidth()}px`;
+    // Fill the widget area edge-to-edge and let the root's symmetric padding
+    // form the gap to the node body, so left/right/bottom margins all match.
+    // (Forcing a pixel width here left-aligned the panel and pushed the slack
+    // onto the right side.)
+    root.style.width = "100%";
+    root.style.margin = "0";
     root.style.height = `${panelHeight()}px`;
     root.style.maxHeight = `${panelHeight()}px`;
     node.graph?.setDirtyCanvas(true, true);
@@ -587,6 +608,24 @@ function enhanceNode(node) {
     if (currentWidth < minWidth || currentHeight < minHeight) {
       node.setSize?.([Math.max(currentWidth, minWidth), Math.max(currentHeight, minHeight)]);
     }
+  }
+
+  function clearTooltip() {
+    if (!tooltip) return;
+    tooltip.remove();
+    tooltip = null;
+  }
+
+  function setPreviewReveal(active, { render = true } = {}) {
+    const next = Boolean(active);
+    if (previewRevealActive === next) return;
+    previewRevealActive = next;
+    if (!previewRevealActive) clearTooltip();
+    if (render && hasHiddenPreviews(state)) renderUi();
+  }
+
+  function resetPreviewReveal() {
+    setPreviewReveal(false, { render: false });
   }
 
   async function privacyPost(endpoint, payload) {
@@ -705,7 +744,6 @@ function enhanceNode(node) {
   }
 
   function saveWithoutRender() {
-    state = normalizeState(state);
     if (state.privacyMode) {
       void encryptAndSetWidget(cloneState(state), { renderAfter: false });
     } else {
@@ -714,7 +752,7 @@ function enhanceNode(node) {
   }
 
   function stopComfyShortcuts(container) {
-    for (const type of ["pointerdown", "pointerup", "wheel"]) {
+    for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) {
       container.addEventListener(
         type,
         (event) => {
@@ -1006,6 +1044,11 @@ function enhanceNode(node) {
     let dialogSearch = "";
     let dialogFolderFilter = state.selectedFolderId || "all";
 
+    const activePrompt = () => {
+      if (isDraft) return prompt;
+      return state.prompts.find((item) => item.id === prompt.id) || prompt;
+    };
+
     const commitDraft = () => {
       if (!isDraft) return;
       if (!String(prompt.title || "").trim()) prompt.title = "Untitled prompt";
@@ -1059,14 +1102,14 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Prompts${isDraft ? " · new draft" : ""}</div>
           <div class="spm-row-wrap">
-            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"', "spm-btn-primary")}
             ${iconButton("close", "Close", 'data-dialog-action="close"', "spm-btn-quiet")}
           </div>
         </div>
         <div class="spm-row" style="align-items:stretch">
           <div style="width:260px;min-width:220px">
             <div class="spm-row-wrap">
-              ${iconButton("add", "Add prompt", 'data-dialog-action="add-prompt"')}
+              ${iconButton("add", "Add prompt", 'data-dialog-action="add-prompt"', "spm-btn-primary")}
               ${iconButton("duplicate", "Duplicate prompt", 'data-dialog-action="duplicate-prompt"')}
               ${iconButton("delete", "Delete prompt", `data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}`, "spm-btn-danger")}
             </div>
@@ -1112,15 +1155,19 @@ function enhanceNode(node) {
 
     const close = (commit = false) => {
       autocomplete.open = false;
-      if (!prompt.locked) {
+      const targetPrompt = activePrompt();
+      if (!targetPrompt.locked) {
         modal.querySelectorAll("[data-dialog-prompt-field]").forEach((fieldElement) => {
           const field = fieldElement.dataset.dialogPromptField;
-          prompt[field] = field === "tags" ? normalizeTags(fieldElement.value) : fieldElement.value;
+          targetPrompt[field] = field === "tags" ? normalizeTags(fieldElement.value) : fieldElement.value;
         });
         modal.querySelectorAll("[data-dialog-prompt-bool]").forEach((boolElement) => {
-          prompt[boolElement.dataset.dialogPromptBool] = boolElement.checked;
+          const field = boolElement.dataset.dialogPromptBool;
+          targetPrompt[field] = boolElement.checked;
+          if (field === "hidden" && boolElement.checked) resetPreviewReveal();
         });
-        prompt.updatedAt = nowIso();
+        targetPrompt.updatedAt = nowIso();
+        prompt = targetPrompt;
       }
       backdrop.remove();
       if (commit) commitDraft();
@@ -1132,6 +1179,14 @@ function enhanceNode(node) {
         const cursor = event.target.selectionStart;
         dialogSearch = event.target.value;
         renderPromptDialog({ selector: "[data-dialog-search]", cursor });
+        return;
+      }
+      if (event.target.dataset.dialogPromptBool) {
+        const field = event.target.dataset.dialogPromptBool;
+        prompt[field] = event.target.checked;
+        if (field === "hidden" && event.target.checked) resetPreviewReveal();
+        prompt.updatedAt = nowIso();
+        if (!isDraft) saveWithoutRender();
         return;
       }
       if (!event.target.dataset.dialogPromptField || prompt.locked) return;
@@ -1160,7 +1215,9 @@ function enhanceNode(node) {
         if (!isDraft) saveWithoutRender();
       }
       if (event.target.dataset.dialogPromptBool) {
-        prompt[event.target.dataset.dialogPromptBool] = event.target.checked;
+        const field = event.target.dataset.dialogPromptBool;
+        prompt[field] = event.target.checked;
+        if (field === "hidden" && event.target.checked) resetPreviewReveal();
         prompt.updatedAt = nowIso();
         if (!isDraft) saveWithoutRender();
       }
@@ -1275,8 +1332,8 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Variables</div>
           <div class="spm-row-wrap">
-            ${iconButton("add", "Add variable", 'data-dialog-action="add-variable"')}
-            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
+            ${iconButton("add", "Add variable", 'data-dialog-action="add-variable"', "spm-btn-primary")}
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"', "spm-btn-primary")}
           </div>
         </div>
         <div class="spm-modal-grid spm-grid-head"><span>Name</span><span>Mode</span><span>Values</span><span>Fixed</span><span>Fallback</span><span>Description</span><span></span></div>
@@ -1376,8 +1433,8 @@ function enhanceNode(node) {
         <div class="spm-modal-header">
           <div class="spm-modal-title">Edit Folders</div>
           <div class="spm-row-wrap">
-            ${iconButton("add", "Add folder", 'data-dialog-action="add-folder"')}
-            ${iconButton("check", "Done", 'data-dialog-action="save-close"')}
+            ${iconButton("add", "Add folder", 'data-dialog-action="add-folder"', "spm-btn-primary")}
+            ${iconButton("check", "Done", 'data-dialog-action="save-close"', "spm-btn-primary")}
           </div>
         </div>
         <div class="spm-mini">Filter folders</div>
@@ -1399,6 +1456,15 @@ function enhanceNode(node) {
 
     renderFolders();
     modal.addEventListener("input", (event) => {
+      const hiddenFolderId = event.target.dataset.dialogFolderHidden;
+      if (hiddenFolderId) {
+        const folder = state.folders.find((item) => item.id === hiddenFolderId);
+        if (!folder) return;
+        folder.hidden = event.target.checked;
+        if (event.target.checked) resetPreviewReveal();
+        saveWithoutRender();
+        return;
+      }
       const folderId = event.target.dataset.dialogFolderName;
       if (!folderId) return;
       const folder = state.folders.find((item) => item.id === folderId);
@@ -1442,6 +1508,7 @@ function enhanceNode(node) {
       const folder = state.folders.find((item) => item.id === folderId);
       if (!folder) return;
       folder.hidden = event.target.checked;
+      if (event.target.checked) resetPreviewReveal();
       saveWithoutRender();
     });
     modal.addEventListener("keydown", (event) => {
@@ -1461,7 +1528,7 @@ function enhanceNode(node) {
     if (privacyLocked) {
       root.innerHTML = `
         <div class="spm-row-wrap">
-          <label title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" title="Encrypt prompt library JSON in saved workflows" checked disabled> Privacy mode</label>
+          ${privacySwitch({ checked: true, disabled: true })}
           ${iconButton("delete", "Reset encrypted prompt data", 'data-action="reset-private-data"', "spm-btn-danger")}
           <span class="spm-muted">${escapeHtml(privacyBusy ? "Decrypting..." : status)}</span>
         </div>
@@ -1484,14 +1551,14 @@ function enhanceNode(node) {
       .map((folder) => `<option value="${escapeHtml(folder.id)}" ${folder.id === state.selectedFolderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>`)
       .join("");
     const selectedPreviewHidden = isPreviewHidden(state, prompt);
-    const revealSelectedPreview = !selectedPreviewHidden || nodeHovering;
+    const revealSelectedPreview = !selectedPreviewHidden || previewRevealActive;
     const previewPlaceholder = '<span class="spm-muted">Preview hidden. Hover over the node to reveal it.</span>';
     const selectedTitle = revealSelectedPreview ? prompt?.title || "No prompt selected" : "Hidden prompt";
     const list = visiblePrompts()
       .map(
         (item) => {
           const itemHidden = isPreviewHidden(state, item);
-          const revealItem = !itemHidden || nodeHovering;
+          const revealItem = !itemHidden || previewRevealActive;
           return `<div class="spm-prompt-item ${item.id === state.selectedPromptId ? "is-selected" : ""}" data-prompt-id="${escapeHtml(item.id)}" title="${escapeHtml(revealItem ? promptHoverPreview(item) : "Hidden prompt. Hover over the node to reveal it.")}">
             <span>${item.favorite ? "★" : "☆"}</span><span class="spm-prompt-title">${escapeHtml(revealItem ? item.title : "Hidden prompt")}</span><span class="spm-mini">${revealItem ? escapeHtml(folderName(state, item.folderId)) : "hidden"}</span>
           </div>`;
@@ -1504,7 +1571,7 @@ function enhanceNode(node) {
         ${iconButton("folder", "Edit folders", 'data-action="open-folders-editor"')}
         ${iconButton("variable", "Edit variables", 'data-action="open-variables-editor"')}
         ${iconButton("reroll", "Reroll variables", 'data-action="reroll"')}
-        <label class="spm-privacy-toggle" title="Encrypt prompt library JSON in saved workflows"><input type="checkbox" aria-label="Privacy mode" title="Encrypt prompt library JSON in saved workflows" data-privacy-mode ${state.privacyMode ? "checked" : ""} ${privacyBusy ? "disabled" : ""}><span>Privacy mode</span></label>
+        ${privacySwitch({ checked: state.privacyMode, disabled: privacyBusy })}
       </div>
       <details class="spm-section" open><summary>Prompt Library</summary>
         <div class="spm-row">
@@ -1550,19 +1617,11 @@ function enhanceNode(node) {
     }, 0);
   }
 
-  root.addEventListener("mouseenter", () => {
-    if (nodeHovering) return;
-    nodeHovering = true;
-    if (hasHiddenPreviews(state)) renderUi();
+  root.addEventListener("pointerenter", () => {
+    setPreviewReveal(true);
   });
-  root.addEventListener("mouseleave", () => {
-    if (!nodeHovering) return;
-    nodeHovering = false;
-    if (tooltip) {
-      tooltip.remove();
-      tooltip = null;
-    }
-    if (hasHiddenPreviews(state)) renderUi();
+  root.addEventListener("pointerleave", () => {
+    setPreviewReveal(false);
   });
 
   root.addEventListener("mouseover", (event) => {
@@ -1668,6 +1727,16 @@ function enhanceNode(node) {
 
   root.addEventListener("input", (event) => {
     const prompt = selectedPrompt(state);
+    if (event.target.matches("[data-privacy-mode]")) return;
+    if (event.target.dataset.promptBool && prompt) {
+      const field = event.target.dataset.promptBool;
+      prompt[field] = event.target.checked;
+      if (field === "hidden" && event.target.checked) resetPreviewReveal();
+      prompt.updatedAt = nowIso();
+      save();
+      return;
+    }
+    if (event.target.type === "checkbox") return;
     if (event.target.matches("[data-field='search']")) {
       state.search = event.target.value;
       savePreservingFocus(event.target);
@@ -1728,7 +1797,9 @@ function enhanceNode(node) {
       return;
     }
     if (event.target.dataset.promptBool && prompt) {
-      prompt[event.target.dataset.promptBool] = event.target.checked;
+      const field = event.target.dataset.promptBool;
+      prompt[field] = event.target.checked;
+      if (field === "hidden" && event.target.checked) resetPreviewReveal();
       prompt.updatedAt = nowIso();
       save();
     }
@@ -1773,6 +1844,8 @@ function enhanceNode(node) {
   root.addEventListener("keyup", (event) => {
     if (isEditableField(event.target)) event.stopPropagation();
   });
+
+  stopComfyShortcuts(root);
 
   const originalOnResize = node.onResize;
   node.onResize = function onResize(size) {
