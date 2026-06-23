@@ -21,6 +21,8 @@ const PANEL_DEFAULT_WIDTH = 520;
 const PANEL_MIN_HEIGHT = 340;
 const PANEL_DEFAULT_HEIGHT = 500;
 const NODE_CHROME_HEIGHT = 220;
+const PANEL_HORIZONTAL_GUTTER = 0;
+const PANEL_BOTTOM_GUTTER = 8;
 const ICON_PATHS = {
   add: "M12 5v14M5 12h14",
   check: "M20 6 9 17l-5-5",
@@ -407,6 +409,19 @@ function hideWidget(widget) {
   widget.draw = () => {};
 }
 
+function setWidgetHeight(widget, height) {
+  if (!widget || widget.height === height) return;
+  try {
+    widget.height = height;
+  } catch {
+    Object.defineProperty(widget, "height", {
+      value: height,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 function createElement(tag, className, html = "") {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -416,6 +431,28 @@ function createElement(tag, className, html = "") {
 
 function isEditableField(target) {
   return Boolean(target?.closest?.("input, textarea, select, button"));
+}
+
+function getComfySetting(name) {
+  const setting = app.extensionManager?.setting?.get?.(name) ?? app.ui?.settings?.getSettingValue?.(name);
+  if (typeof setting === "object" && setting !== null) return setting.value ?? setting.id ?? setting.name ?? setting.text;
+  return setting;
+}
+
+function getRendererMode() {
+  const renderer = String(getComfySetting("Comfy.Graph.Renderer") ?? "").toLowerCase();
+  if (renderer) {
+    if (renderer.includes("litegraph") || renderer.includes("canvas") || renderer.includes("classic") || renderer.includes("legacy")) return "legacy";
+    if (renderer.includes("vue") || renderer.includes("dom") || renderer.includes("modern") || /nodes?\s*2|2\.0/.test(renderer)) return "vue";
+  }
+
+  const vueNodesEnabled = getComfySetting("Comfy.VueNodes.Enabled");
+  const vueNodesValue = String(vueNodesEnabled ?? "").toLowerCase();
+  if (vueNodesEnabled === true || vueNodesValue === "true" || vueNodesValue === "enabled") return "vue";
+  if (vueNodesEnabled === false || vueNodesValue === "false" || vueNodesValue === "disabled") return "legacy";
+
+  if (document.querySelector(".lg-node")) return "vue";
+  return "legacy";
 }
 
 function injectStyles() {
@@ -440,6 +477,7 @@ function injectStyles() {
     }
 
     /* ---- Root / layout ---- */
+    .spm-widget-frame{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:visible}
     .spm-root{font:12px/1.4 var(--helto-font-sans);color:var(--helto-text);background:var(--helto-surface);border:1px solid var(--helto-border);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow);padding:9px;width:100%;height:100%;overflow:auto;box-sizing:border-box;overscroll-behavior:contain;-webkit-font-smoothing:antialiased}
     .spm-root *,.spm-root *::before,.spm-root *::after{box-sizing:border-box}
     .spm-row{display:flex;gap:6px;align-items:center;margin:6px 0}.spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
@@ -558,7 +596,10 @@ function enhanceNode(node) {
   let privacyLocked = Boolean(initialEncryptedValue);
   let privacyBusy = false;
   let encryptSequence = 0;
+  const widgetFrame = createElement("div", "spm-widget-frame");
   const root = createElement("div", "spm-root");
+  widgetFrame.appendChild(root);
+  let uiWidget = null;
 
   const seedWidget = node.widgets?.find((widget) => widget.name === "seed");
   const rerollWidget = node.widgets?.find((widget) => widget.name === "reroll");
@@ -580,24 +621,70 @@ function enhanceNode(node) {
   }
 
   function panelWidth() {
-    return Math.max(PANEL_MIN_WIDTH, Math.floor((node.size?.[0] || PANEL_DEFAULT_WIDTH + 20) - 28));
+    return Math.max(PANEL_MIN_WIDTH, Math.floor((node.size?.[0] || PANEL_DEFAULT_WIDTH + PANEL_HORIZONTAL_GUTTER * 2) - PANEL_HORIZONTAL_GUTTER * 2));
   }
 
   function panelHeight() {
     return Math.max(PANEL_MIN_HEIGHT, Math.floor((node.size?.[1] || PANEL_DEFAULT_HEIGHT + NODE_CHROME_HEIGHT) - NODE_CHROME_HEIGHT));
   }
 
-  function syncPanelSize() {
+  function shouldUseVueLayout() {
+    return getRendererMode() === "vue" || Boolean(root.closest(".lg-node"));
+  }
+
+  function syncWidgetSizingCallbacks() {
+    if (!uiWidget) return;
+    if (shouldUseVueLayout()) {
+      uiWidget.computeLayoutSize = undefined;
+      uiWidget.computeSize = undefined;
+      uiWidget.getMinHeight = () => panelHeight();
+      uiWidget.getMaxHeight = () => panelHeight();
+      uiWidget.getHeight = () => panelHeight();
+      if (uiWidget.options) {
+        uiWidget.options.getMinHeight = uiWidget.getMinHeight;
+        uiWidget.options.getMaxHeight = uiWidget.getMaxHeight;
+        uiWidget.options.getHeight = uiWidget.getHeight;
+      }
+      return;
+    }
+
+    delete uiWidget.computeLayoutSize;
+    uiWidget.computeSize = () => [Math.max(PANEL_MIN_WIDTH + PANEL_HORIZONTAL_GUTTER * 2, node.size?.[0] || PANEL_DEFAULT_WIDTH + PANEL_HORIZONTAL_GUTTER * 2), panelHeight() + PANEL_BOTTOM_GUTTER];
+  }
+
+  function syncLegacyWidgetBounds() {
+    if (!uiWidget || shouldUseVueLayout()) return;
+    const widgetWidth = Math.max(PANEL_MIN_WIDTH + PANEL_HORIZONTAL_GUTTER * 2, node.size?.[0] || PANEL_DEFAULT_WIDTH + PANEL_HORIZONTAL_GUTTER * 2);
+    const widgetHeight = panelHeight() + PANEL_BOTTOM_GUTTER;
+    uiWidget.x = 0;
+    uiWidget.width = widgetWidth;
+    uiWidget.computedHeight = widgetHeight;
+    setWidgetHeight(uiWidget, widgetHeight);
+    widgetFrame.style.height = `${widgetHeight}px`;
+    widgetFrame.style.minHeight = `${widgetHeight}px`;
+    widgetFrame.style.maxHeight = `${widgetHeight}px`;
+  }
+
+  function syncPanelSize({ dirty = true } = {}) {
     refreshNodeTheme();
+    syncWidgetSizingCallbacks();
+    const legacyLayout = uiWidget && !shouldUseVueLayout();
+    widgetFrame.style.boxSizing = "border-box";
+    widgetFrame.style.margin = "0";
+    widgetFrame.style.width = "100%";
+    widgetFrame.style.height = `${panelHeight()}px`;
+    widgetFrame.style.minHeight = `${panelHeight()}px`;
+    widgetFrame.style.maxHeight = `${panelHeight()}px`;
     // Fill the widget area edge-to-edge and let the root's symmetric padding
     // form the gap to the node body, so left/right/bottom margins all match.
     // (Forcing a pixel width here left-aligned the panel and pushed the slack
     // onto the right side.)
-    root.style.width = "100%";
-    root.style.margin = "0";
+    root.style.width = legacyLayout ? `calc(100% - ${PANEL_HORIZONTAL_GUTTER * 2}px)` : "100%";
+    root.style.margin = legacyLayout ? `0 ${PANEL_HORIZONTAL_GUTTER}px` : "0";
     root.style.height = `${panelHeight()}px`;
     root.style.maxHeight = `${panelHeight()}px`;
-    node.graph?.setDirtyCanvas(true, true);
+    syncLegacyWidgetBounds();
+    if (dirty) node.graph?.setDirtyCanvas(true, true);
   }
 
   function ensureMinimumNodeSize() {
@@ -752,7 +839,7 @@ function enhanceNode(node) {
   }
 
   function stopComfyShortcuts(container) {
-    for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) {
+    for (const type of ["pointerdown", "pointerup", "wheel"]) {
       container.addEventListener(
         type,
         (event) => {
@@ -1854,21 +1941,33 @@ function enhanceNode(node) {
     return result;
   };
 
+  const originalSetSize = node.setSize;
+  node.setSize = function setSize(size) {
+    const result = originalSetSize ? originalSetSize.apply(this, arguments) : undefined;
+    if (!originalSetSize && Array.isArray(size)) this.size = size;
+    syncPanelSize();
+    return result;
+  };
+
   const originalOnDrawForeground = node.onDrawForeground;
   node.onDrawForeground = function onDrawForeground(ctx) {
     const result = originalOnDrawForeground?.apply(this, arguments);
     refreshNodeTheme();
+    syncPanelSize({ dirty: false });
     return result;
   };
 
   if (node.addDOMWidget) {
-    const uiWidget = node.addDOMWidget("smart_prompt_manager_ui", "SmartPromptManager", root, {
+    uiWidget = node.addDOMWidget("smart_prompt_manager_ui", "SmartPromptManager", widgetFrame, {
       serialize: false,
       hideOnZoom: false,
       getMinHeight: () => panelHeight(),
       getMaxHeight: () => panelHeight(),
+      getHeight: () => panelHeight(),
+      onDraw: () => syncPanelSize({ dirty: false }),
     });
-    uiWidget.computeSize = () => [panelWidth() + 12, panelHeight() + 8];
+    syncWidgetSizingCallbacks();
+    requestAnimationFrame(() => syncPanelSize());
   } else {
     node.addWidget("button", "Smart Prompt Manager UI unavailable", null, () => {});
   }
