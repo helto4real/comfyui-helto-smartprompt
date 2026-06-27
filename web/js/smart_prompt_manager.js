@@ -5,6 +5,11 @@ const EXTENSION_NAME = "helto.smartPromptManager";
 const VALID_NAME_RE = /^[A-Za-z0-9_-]+$/;
 const TOKEN_RE = /\{\{([^{}]*)\}\}/g;
 const MODES = ["random", "fixed", "cycle"];
+const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
+const SEED_MAX = Number.MAX_SAFE_INTEGER;
+const SPM_SEED_QUEUE_WRAPPER_KEY = "__smartPromptManagerSeedQueuePromptWrapper";
+const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallScheduled";
+const SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT = 80;
 const VIRTUAL_FOLDERS = [
   { id: "all", name: "All" },
   { id: "unsorted", name: "Unsorted" },
@@ -50,6 +55,60 @@ function nowIso() {
 function makeId(prefix) {
   if (crypto?.randomUUID) return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
   return `${prefix}_${Math.random().toString(16).slice(2, 14)}`;
+}
+
+function randomUnit53() {
+  if (globalThis.crypto?.getRandomValues) {
+    const values = new Uint32Array(2);
+    globalThis.crypto.getRandomValues(values);
+    return (((values[0] & 0x1fffff) * 0x100000000) + values[1]) / 0x20000000000000;
+  }
+  return Math.random();
+}
+
+function randomSeed() {
+  return Math.floor(randomUnit53() * SEED_MAX) + 1;
+}
+
+function widgetByName(node, name) {
+  return node?.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function isSmartPromptManagerNode(node) {
+  return (
+    node?.type === NODE_CLASS ||
+    node?.comfyClass === NODE_CLASS ||
+    node?.constructor?.type === NODE_CLASS ||
+    node?.constructor?.comfyClass === NODE_CLASS ||
+    node?.title === "Smart Prompt Manager"
+  );
+}
+
+function defaultGraph() {
+  return app.rootGraph || app.graph;
+}
+
+function graphNodes(graph = defaultGraph()) {
+  const nodes = [];
+  const seenNodes = new Set();
+  const seenGraphs = new Set();
+
+  function visit(currentGraph) {
+    if (!currentGraph || seenGraphs.has(currentGraph)) return;
+    seenGraphs.add(currentGraph);
+    for (const node of currentGraph.nodes || currentGraph._nodes || []) {
+      if (!node || seenNodes.has(node)) continue;
+      seenNodes.add(node);
+      nodes.push(node);
+      if (node.subgraph) visit(node.subgraph);
+    }
+    for (const subgraph of currentGraph.subgraphs?.values?.() || []) {
+      visit(subgraph);
+    }
+  }
+
+  visit(graph);
+  return nodes;
 }
 
 function escapeHtml(value) {
@@ -394,12 +453,208 @@ function suffixName(name, existing) {
 
 function setWidgetValue(node, widget, state) {
   widget.value = JSON.stringify(state, null, 2);
-  if (node.graph) node.graph.setDirtyCanvas(true, true);
+  markNodeDirty(node);
 }
 
 function setWidgetRawValue(node, widget, value) {
   widget.value = value;
-  if (node.graph) node.graph.setDirtyCanvas(true, true);
+  markNodeDirty(node);
+}
+
+function markNodeDirty(node) {
+  if (typeof node?.setDirtyCanvas === "function") {
+    node.setDirtyCanvas(true, true);
+  } else {
+    app.graph?.setDirtyCanvas?.(true, true);
+  }
+  node?.graph?.setDirtyCanvas?.(true, true);
+  app.canvas?.setDirty?.(true, true);
+}
+
+function validSeedControlMode(value) {
+  return SEED_CONTROL_MODES.includes(value) ? value : null;
+}
+
+function isSeedControlWidget(widget, seedWidget = null) {
+  const values = widget?.options?.values;
+  const seedName = String(seedWidget?.name || "seed");
+  return (
+    widget?.name === "control_after_generate" ||
+    widget?.name === `${seedName}.control_after_generate` ||
+    widget?.name === `${seedName}_control_after_generate` ||
+    (Array.isArray(values) && SEED_CONTROL_MODES.every((value) => values.includes(value)))
+  );
+}
+
+function seedControlWidget(node, seedWidget = widgetByName(node, "seed")) {
+  for (const widget of seedWidget?.linkedWidgets || []) {
+    if (isSeedControlWidget(widget, seedWidget)) {
+      return widget;
+    }
+  }
+  return node?.widgets?.find((widget) => widget !== seedWidget && isSeedControlWidget(widget, seedWidget)) || null;
+}
+
+function liveSeedControlMode(node) {
+  const seedWidget = widgetByName(node, "seed");
+  const controlWidget = seedControlWidget(node, seedWidget);
+  return (
+    validSeedControlMode(controlWidget?.value) ??
+    validSeedControlMode(seedWidget?.control_after_generate) ??
+    validSeedControlMode(seedWidget?.options?.control_after_generate)
+  );
+}
+
+function writeWidgetValue(node, widget, value) {
+  if (!node || !widget) return false;
+  const previousValue = widget.value;
+  widget.value = value;
+  widget.callback?.(value, app.canvas, node, widget);
+  node.onWidgetChanged?.(widget.name ?? "", value, previousValue, widget);
+  node.graph?.incrementVersion?.();
+  markNodeDirty(node);
+  return true;
+}
+
+function widgetSerializesToWorkflow(widget) {
+  return Boolean(widget) && widget.serialize !== false && widget.options?.serialize !== false;
+}
+
+function serializedWidgetIndex(node, targetWidget) {
+  let serializedIndex = 0;
+  for (const widget of node?.widgets || []) {
+    if (widget === targetWidget) {
+      return widgetSerializesToWorkflow(widget) ? serializedIndex : -1;
+    }
+    if (widgetSerializesToWorkflow(widget)) {
+      serializedIndex += 1;
+    }
+  }
+  return -1;
+}
+
+function writeSerializedWidgetValue(node, widget, value) {
+  const index = serializedWidgetIndex(node, widget);
+  for (const values of [node?.widgets_values, node?.last_serialization?.widgets_values]) {
+    if (Array.isArray(values) && index >= 0 && index < values.length) {
+      values[index] = value;
+    }
+  }
+}
+
+function writeSpmSeedValue(node, seed) {
+  const seedWidget = widgetByName(node, "seed");
+  if (!writeWidgetValue(node, seedWidget, seed)) {
+    return false;
+  }
+  writeSerializedWidgetValue(node, seedWidget, seed);
+  return true;
+}
+
+function suspendSeedControlCallbacks(controlWidget) {
+  if (!controlWidget) return null;
+  const beforeQueued = controlWidget.beforeQueued;
+  const afterQueued = controlWidget.afterQueued;
+  const beforeQueuedNoop = () => {};
+  const afterQueuedNoop = () => {};
+  controlWidget.beforeQueued = beforeQueuedNoop;
+  controlWidget.afterQueued = afterQueuedNoop;
+  return {
+    controlWidget,
+    beforeQueued,
+    afterQueued,
+    beforeQueuedNoop,
+    afterQueuedNoop,
+  };
+}
+
+function restoreSeedControlCallbacks(suspended) {
+  for (const item of suspended) {
+    if (item.controlWidget.beforeQueued === item.beforeQueuedNoop) {
+      item.controlWidget.beforeQueued = item.beforeQueued;
+    }
+    if (item.controlWidget.afterQueued === item.afterQueuedNoop) {
+      item.controlWidget.afterQueued = item.afterQueued;
+    }
+  }
+}
+
+function randomizeSpmSeedsBeforeQueue() {
+  const queuedSeeds = [];
+  for (const node of graphNodes()) {
+    if (!isSmartPromptManagerNode(node) || liveSeedControlMode(node) !== "randomize") {
+      continue;
+    }
+    const seedWidget = widgetByName(node, "seed");
+    const controlWidget = seedControlWidget(node, seedWidget);
+    const seed = randomSeed();
+    if (!writeSpmSeedValue(node, seed)) {
+      continue;
+    }
+    node._spmQueuedSeed = { seed, at: Date.now() };
+    queuedSeeds.push({
+      node,
+      seed,
+      suspended: suspendSeedControlCallbacks(controlWidget),
+    });
+  }
+  return queuedSeeds;
+}
+
+function restoreQueuedSpmSeeds(queuedSeeds) {
+  restoreSeedControlCallbacks(queuedSeeds.map((item) => item.suspended).filter(Boolean));
+  for (const { node, seed } of queuedSeeds) {
+    const queuedSeed = node?._spmQueuedSeed;
+    if (!queuedSeed || queuedSeed.seed !== seed || Date.now() - queuedSeed.at > 10000) {
+      continue;
+    }
+    if (Number(widgetByName(node, "seed")?.value) !== Number(seed)) {
+      writeSpmSeedValue(node, seed);
+    }
+  }
+}
+
+function installSpmSeedQueuePatch(source = "install") {
+  if (typeof app.queuePrompt !== "function") {
+    return false;
+  }
+  if (app.queuePrompt[SPM_SEED_QUEUE_WRAPPER_KEY]) {
+    return true;
+  }
+
+  const originalQueuePrompt = app.queuePrompt;
+  const wrappedQueuePrompt = async function (...args) {
+    const queuedSeeds = randomizeSpmSeedsBeforeQueue();
+    try {
+      return await originalQueuePrompt.apply(this, args);
+    } finally {
+      restoreQueuedSpmSeeds(queuedSeeds);
+    }
+  };
+  Object.defineProperty(wrappedQueuePrompt, SPM_SEED_QUEUE_WRAPPER_KEY, {
+    value: true,
+    configurable: true,
+  });
+  app.queuePrompt = wrappedQueuePrompt;
+  return true;
+}
+
+function scheduleSpmSeedQueuePatch(source = "top-level") {
+  if (globalThis[SPM_SEED_QUEUE_INSTALL_KEY]) {
+    installSpmSeedQueuePatch(`${source}:resync`);
+    return;
+  }
+  globalThis[SPM_SEED_QUEUE_INSTALL_KEY] = true;
+
+  let attempts = 0;
+  function attempt() {
+    attempts += 1;
+    installSpmSeedQueuePatch(`${source}:${attempts}`);
+    if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
+      setTimeout(attempt, 250);
+    }
+  }
+  attempt();
 }
 
 function hideWidget(widget) {
@@ -1979,8 +2234,13 @@ function enhanceNode(node) {
   if (initialEncryptedValue) void decryptInitialState();
 }
 
+scheduleSpmSeedQueuePatch();
+
 app.registerExtension({
   name: EXTENSION_NAME,
+  setup() {
+    scheduleSpmSeedQueuePatch("setup");
+  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_CLASS) return;
     const original = nodeType.prototype.onNodeCreated;
