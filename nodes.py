@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 try:
@@ -22,6 +23,9 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+CACHE_TOKEN_PREFIX = "spm-cache-v1:"
+
+
 def _empty_state() -> dict[str, Any]:
     state = default_state()
     state["prompts"] = []
@@ -32,7 +36,98 @@ def _empty_state() -> dict[str, Any]:
     return state
 
 
-def parse_spm_data(value: Any):
+def is_cache_token(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(CACHE_TOKEN_PREFIX)
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            loaded = json.loads(value)
+        except Exception:
+            return None
+        if isinstance(loaded, Mapping):
+            return loaded
+    return None
+
+
+def _looks_like_spm_payload(value: Any) -> bool:
+    if is_cache_token(value) or is_encrypted_payload(value):
+        return is_encrypted_payload(value)
+    payload = _as_mapping(value)
+    if payload is None:
+        return False
+    return any(key in payload for key in ("prompts", "variables", "selectedPromptId", "folders", "privacyMode"))
+
+
+def _workflow_from_extra(extra_pnginfo: Any) -> Mapping[str, Any] | None:
+    if not isinstance(extra_pnginfo, Mapping):
+        return None
+    workflow = extra_pnginfo.get("workflow")
+    if isinstance(workflow, Mapping):
+        return workflow
+    if isinstance(workflow, str) and workflow.strip():
+        try:
+            loaded = json.loads(workflow)
+        except Exception:
+            return None
+        if isinstance(loaded, Mapping):
+            return loaded
+    return None
+
+
+def _workflow_widget_values(node: Mapping[str, Any]) -> list[Any]:
+    widgets = node.get("widgets_values", [])
+    if isinstance(widgets, Mapping):
+        values: list[Any] = []
+        for key in ("spm_data", "0"):
+            if key in widgets:
+                values.append(widgets[key])
+        values.extend(widgets.values())
+        return values
+    if isinstance(widgets, Sequence) and not isinstance(widgets, (str, bytes, bytearray)):
+        return list(widgets)
+    return []
+
+
+def _spm_data_from_workflow(unique_id: Any, extra_pnginfo: Any) -> tuple[Any | None, list[str]]:
+    if unique_id is None or str(unique_id) == "":
+        return None, ["Smart Prompt Manager cache token could not be resolved because ComfyUI did not provide the node id."]
+
+    workflow = _workflow_from_extra(extra_pnginfo)
+    if workflow is None:
+        return None, ["Smart Prompt Manager cache token could not be resolved because workflow metadata is missing."]
+
+    nodes = workflow.get("nodes", [])
+    if not isinstance(nodes, Sequence) or isinstance(nodes, (str, bytes, bytearray)):
+        return None, ["Smart Prompt Manager cache token could not be resolved because workflow metadata has no node list."]
+
+    matching_node: Mapping[str, Any] | None = None
+    for node in nodes:
+        if isinstance(node, Mapping) and str(node.get("id")) == str(unique_id):
+            matching_node = node
+            break
+
+    if matching_node is None:
+        return None, [f"Smart Prompt Manager cache token could not find workflow node '{unique_id}'."]
+
+    for candidate in _workflow_widget_values(matching_node):
+        if _looks_like_spm_payload(candidate):
+            return candidate, []
+
+    return None, [f"Smart Prompt Manager cache token could not find saved prompt data for workflow node '{unique_id}'."]
+
+
+def parse_spm_data(value: Any, unique_id: Any = None, extra_pnginfo: Any = None):
+    if is_cache_token(value):
+        resolved_value, warnings = _spm_data_from_workflow(unique_id, extra_pnginfo)
+        if resolved_value is None:
+            return _empty_state(), warnings
+        state, parse_warnings = parse_spm_data(resolved_value)
+        return state, warnings + parse_warnings
+
     if is_encrypted_payload(value):
         try:
             return decrypt_state(value)
@@ -105,16 +200,17 @@ class SmartPromptManager:
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": "fixed"}),
                 "reroll": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFF}),
-            }
+            },
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     @classmethod
-    def IS_CHANGED(cls, spm_data: str, seed: int = 0, reroll: int = 0):
+    def IS_CHANGED(cls, spm_data: str, seed: int = 0, reroll: int = 0, unique_id=None, extra_pnginfo=None):
         payload = f"{spm_data}\n{seed}\n{reroll}".encode("utf-8", errors="replace")
         return hashlib.sha256(payload).hexdigest()
 
-    def resolve(self, spm_data: str, seed: int = 0, reroll: int = 0):
-        state, parse_warnings = parse_spm_data(spm_data)
+    def resolve(self, spm_data: str, seed: int = 0, reroll: int = 0, unique_id=None, extra_pnginfo=None):
+        state, parse_warnings = parse_spm_data(spm_data, unique_id=unique_id, extra_pnginfo=extra_pnginfo)
         prompt = selected_prompt(state)
         raw_prompt = str(prompt.get("text", "")) if prompt else ""
         prompt_name = str(prompt.get("title", "")) if prompt else ""

@@ -7,14 +7,19 @@ const TOKEN_RE = /\{\{([^{}]*)\}\}/g;
 const MODES = ["random", "fixed", "cycle"];
 const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
 const SEED_MAX = Number.MAX_SAFE_INTEGER;
+const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
+const SPM_PRIVACY_FIELD = "spm_data";
 const SPM_SEED_QUEUE_WRAPPER_KEY = "__smartPromptManagerSeedQueuePromptWrapper";
 const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallScheduled";
+const SPM_GRAPH_TO_PROMPT_WRAPPER_KEY = "__smartPromptManagerGraphToPromptWrapper";
+const SPM_GRAPH_TO_PROMPT_INSTALL_KEY = "__smartPromptManagerGraphToPromptInstallScheduled";
 const SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT = 80;
 const VIRTUAL_FOLDERS = [
   { id: "all", name: "All" },
   { id: "unsorted", name: "Unsorted" },
   { id: "favorites", name: "Favorites" },
 ];
+let spmQueuePromptDepth = 0;
 const KEYS = {
   next: "n",
   previous: "p",
@@ -143,6 +148,19 @@ function stableHash(text) {
   return value >>> 0;
 }
 
+function bytesToHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(text) {
+  if (globalThis.crypto?.subtle && globalThis.TextEncoder) {
+    const data = new TextEncoder().encode(String(text ?? ""));
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+    return bytesToHex(new Uint8Array(digest));
+  }
+  return stableHash(String(text ?? "")).toString(16).padStart(8, "0");
+}
+
 function defaultState() {
   const folderId = makeId("folder");
   const promptId = makeId("prompt");
@@ -254,6 +272,120 @@ function isEncryptedStateValue(value) {
   const parsed = parseJsonObject(value);
   return parsed.encrypted === true && parsed.schema === "comfyui-helto-prompts.smart-prompt-manager";
 }
+
+// ---- Privacy envelope memo helpers ----
+const SPM_PRIVACY_MEMOS = new WeakMap();
+
+function stableCanonicalValue(value) {
+  if (Array.isArray(value)) return value.map((item) => stableCanonicalValue(item));
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const key of Object.keys(value).sort()) {
+      result[key] = stableCanonicalValue(value[key]);
+    }
+    return result;
+  }
+  return value;
+}
+
+function canonicalPrivacyPlaintext(value) {
+  const canonical = JSON.stringify(stableCanonicalValue(value));
+  return canonical === undefined ? "null" : canonical;
+}
+
+function isPrivacyEnvelopeValue(value) {
+  const parsed = parseJsonObject(value);
+  return parsed.encrypted === true && parsed.schema === "comfyui-helto-prompts.smart-prompt-manager";
+}
+
+export function encryptedPrivacyEnvelopeString(value) {
+  if (!isPrivacyEnvelopeValue(value)) return "";
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function privacyMemoBucket(owner, create = false) {
+  if (!owner || (typeof owner !== "object" && typeof owner !== "function")) return null;
+  let bucket = SPM_PRIVACY_MEMOS.get(owner);
+  if (!bucket && create) {
+    bucket = new Map();
+    SPM_PRIVACY_MEMOS.set(owner, bucket);
+  }
+  return bucket || null;
+}
+
+export function rememberPrivacyEnvelope(owner, fieldName, plaintext, envelope) {
+  const envelopeString = encryptedPrivacyEnvelopeString(envelope);
+  if (!envelopeString) return "";
+  const bucket = privacyMemoBucket(owner, true);
+  if (!bucket) return envelopeString;
+  bucket.set(String(fieldName), {
+    canonicalPlaintext: canonicalPrivacyPlaintext(plaintext),
+    envelopeString,
+    pending: null,
+  });
+  return envelopeString;
+}
+
+export function rememberedPrivacyEnvelope(owner, fieldName, plaintext) {
+  const bucket = privacyMemoBucket(owner, false);
+  const memo = bucket?.get(String(fieldName));
+  if (!memo) return "";
+  return memo.canonicalPlaintext === canonicalPrivacyPlaintext(plaintext) ? memo.envelopeString : "";
+}
+
+export function forgetPrivacyEnvelope(owner, fieldName) {
+  const bucket = privacyMemoBucket(owner, false);
+  if (!bucket) return;
+  bucket.delete(String(fieldName));
+}
+
+export async function encryptedOrReusePrivacyValue(owner, fieldName, currentValue, encryptFn) {
+  const currentEnvelope = encryptedPrivacyEnvelopeString(currentValue);
+  if (currentEnvelope) return currentEnvelope;
+
+  const canonicalPlaintext = canonicalPrivacyPlaintext(currentValue);
+  const bucket = privacyMemoBucket(owner, true);
+  if (!bucket) return encryptedPrivacyEnvelopeString(await encryptFn(JSON.parse(canonicalPlaintext)));
+
+  const key = String(fieldName);
+  let memo = bucket.get(key);
+  if (memo?.canonicalPlaintext === canonicalPlaintext && memo.envelopeString) {
+    return memo.envelopeString;
+  }
+  if (memo?.pending?.canonicalPlaintext === canonicalPlaintext) {
+    return memo.pending.promise;
+  }
+
+  if (!memo) {
+    memo = { canonicalPlaintext: "", envelopeString: "", pending: null };
+    bucket.set(key, memo);
+  }
+  const plaintextSnapshot = JSON.parse(canonicalPlaintext);
+  const pending = {
+    canonicalPlaintext,
+    promise: null,
+  };
+  pending.promise = Promise.resolve(encryptFn(plaintextSnapshot))
+    .then((envelope) => {
+      const envelopeString = encryptedPrivacyEnvelopeString(envelope);
+      if (!envelopeString) throw new Error("Privacy encryption did not return an encrypted Smart Prompt Manager envelope.");
+      const latest = bucket.get(key);
+      if (latest?.pending === pending) {
+        latest.canonicalPlaintext = canonicalPlaintext;
+        latest.envelopeString = envelopeString;
+        latest.pending = null;
+      }
+      return envelopeString;
+    })
+    .catch((error) => {
+      const latest = bucket.get(key);
+      if (latest?.pending === pending) latest.pending = null;
+      throw error;
+    });
+  memo.pending = pending;
+  return pending.promise;
+}
+// ---- End privacy envelope memo helpers ----
 
 function normalizeState(data) {
   if (!data || typeof data !== "object") return defaultState();
@@ -452,12 +584,16 @@ function suffixName(name, existing) {
 }
 
 function setWidgetValue(node, widget, state) {
+  if (!widget) return;
   widget.value = JSON.stringify(state, null, 2);
+  writeSerializedWidgetValue(node, widget, widget.value);
   markNodeDirty(node);
 }
 
 function setWidgetRawValue(node, widget, value) {
+  if (!widget) return;
   widget.value = value;
+  writeSerializedWidgetValue(node, widget, value);
   markNodeDirty(node);
 }
 
@@ -625,9 +761,11 @@ function installSpmSeedQueuePatch(source = "install") {
   const originalQueuePrompt = app.queuePrompt;
   const wrappedQueuePrompt = async function (...args) {
     const queuedSeeds = randomizeSpmSeedsBeforeQueue();
+    spmQueuePromptDepth += 1;
     try {
       return await originalQueuePrompt.apply(this, args);
     } finally {
+      spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);
       restoreQueuedSpmSeeds(queuedSeeds);
     }
   };
@@ -650,6 +788,115 @@ function scheduleSpmSeedQueuePatch(source = "top-level") {
   function attempt() {
     attempts += 1;
     installSpmSeedQueuePatch(`${source}:${attempts}`);
+    if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
+      setTimeout(attempt, 250);
+    }
+  }
+  attempt();
+}
+
+function liveSpmExecutionState(node, outputNode = null) {
+  const exposed = node?._spmExecutionState;
+  if (exposed && typeof exposed === "object") {
+    return normalizeState(exposed);
+  }
+  const rawValue = widgetByName(node, SPM_PRIVACY_FIELD)?.value ?? outputNode?.inputs?.spm_data;
+  if (rawValue == null || rawValue === "" || (typeof rawValue === "string" && rawValue.startsWith(SPM_CACHE_TOKEN_PREFIX))) {
+    return null;
+  }
+  if (isEncryptedStateValue(rawValue)) {
+    return null;
+  }
+  return parseState(rawValue);
+}
+
+async function spmCacheTokenForNode(node, outputNode = null) {
+  const state = liveSpmExecutionState(node, outputNode);
+  let tokenSource = "";
+  if (state) {
+    const seed = Number.parseInt(widgetByName(node, "seed")?.value ?? outputNode?.inputs?.seed ?? 0, 10) || 0;
+    const reroll = Number.parseInt(widgetByName(node, "reroll")?.value ?? outputNode?.inputs?.reroll ?? 0, 10) || 0;
+    const prompt = selectedPrompt(state);
+    tokenSource = resolvePrompt(prompt?.text || "", state.variables, seed, reroll, state.cycleState).resolved_prompt;
+  } else {
+    const encryptedValue = widgetByName(node, SPM_PRIVACY_FIELD)?.value ?? outputNode?.inputs?.spm_data;
+    if (!encryptedValue) return null;
+    tokenSource = `encrypted:${String(encryptedValue)}`;
+  }
+  return `${SPM_CACHE_TOKEN_PREFIX}${await sha256Hex(tokenSource)}`;
+}
+
+async function applySpmCacheTokensToPrompt(prompt, graph = defaultGraph()) {
+  const output = prompt?.output;
+  if (!output || typeof output !== "object") return prompt;
+  const nodesById = new Map(graphNodes(graph).map((node) => [String(node.id), node]));
+  for (const [nodeId, outputNode] of Object.entries(output)) {
+    if (!outputNode || typeof outputNode !== "object" || outputNode.class_type !== NODE_CLASS) continue;
+    const node = nodesById.get(String(nodeId)) || null;
+    const token = await spmCacheTokenForNode(node, outputNode);
+    if (!token) continue;
+    outputNode.inputs ||= {};
+    outputNode.inputs.spm_data = token;
+    outputNode.is_changed = token;
+  }
+  return prompt;
+}
+
+function prepareSpmPrivacyForSerialization(graph = defaultGraph()) {
+  return graphNodes(graph)
+    .map((node) => node?._spmPreparePrivacySerialization?.())
+    .filter(Boolean);
+}
+
+async function waitForSpmPrivacySaves(graph = defaultGraph()) {
+  const pending = [
+    ...prepareSpmPrivacyForSerialization(graph),
+    ...graphNodes(graph)
+      .map((node) => node?._spmPendingPrivacySave)
+      .filter(Boolean),
+  ];
+  if (pending.length) {
+    await Promise.all(pending.map((promise) => Promise.resolve(promise).catch(() => {})));
+  }
+}
+
+function installSpmGraphToPromptPatch(source = "install") {
+  if (typeof app.graphToPrompt !== "function") {
+    return false;
+  }
+  if (app.graphToPrompt[SPM_GRAPH_TO_PROMPT_WRAPPER_KEY]) {
+    return true;
+  }
+
+  const originalGraphToPrompt = app.graphToPrompt;
+  const wrappedGraphToPrompt = async function (...args) {
+    const graph = args[0] || this?.graph || defaultGraph();
+    await waitForSpmPrivacySaves(graph);
+    const prompt = await originalGraphToPrompt.apply(this, args);
+    if (spmQueuePromptDepth > 0) {
+      return await applySpmCacheTokensToPrompt(prompt, graph);
+    }
+    return prompt;
+  };
+  Object.defineProperty(wrappedGraphToPrompt, SPM_GRAPH_TO_PROMPT_WRAPPER_KEY, {
+    value: true,
+    configurable: true,
+  });
+  app.graphToPrompt = wrappedGraphToPrompt;
+  return true;
+}
+
+function scheduleSpmGraphToPromptPatch(source = "top-level") {
+  if (globalThis[SPM_GRAPH_TO_PROMPT_INSTALL_KEY]) {
+    installSpmGraphToPromptPatch(`${source}:resync`);
+    return;
+  }
+  globalThis[SPM_GRAPH_TO_PROMPT_INSTALL_KEY] = true;
+
+  let attempts = 0;
+  function attempt() {
+    attempts += 1;
+    installSpmGraphToPromptPatch(`${source}:${attempts}`);
     if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
       setTimeout(attempt, 250);
     }
@@ -836,12 +1083,14 @@ function injectStyles() {
 
 function enhanceNode(node) {
   injectStyles();
-  const dataWidget = node.widgets?.find((widget) => widget.name === "spm_data");
+  const dataWidget = node.widgets?.find((widget) => widget.name === SPM_PRIVACY_FIELD);
   if (!dataWidget || node.__spmEnhanced) return;
   node.__spmEnhanced = true;
   hideWidget(dataWidget);
 
-  const initialEncryptedValue = isEncryptedStateValue(dataWidget.value) ? dataWidget.value : "";
+  const originalOnSerialize = node.onSerialize;
+  const originalSerializeValue = dataWidget.serializeValue;
+  const initialEncryptedValue = encryptedPrivacyEnvelopeString(dataWidget.value);
   let state = initialEncryptedValue ? defaultState() : parseState(dataWidget.value);
   let status = initialEncryptedValue ? "Decrypting private prompt library..." : "";
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
@@ -985,21 +1234,51 @@ function enhanceNode(node) {
     return JSON.parse(JSON.stringify(value));
   }
 
+  function normalizedSnapshot(value = state) {
+    return cloneState(normalizeState(value));
+  }
+
+  function exposeExecutionState() {
+    if (privacyLocked) return;
+    node._spmExecutionState = normalizedSnapshot(state);
+  }
+
+  function trackPrivacySave(promise) {
+    const tracked = Promise.resolve(promise).finally(() => {
+      if (node._spmPendingPrivacySave === tracked) {
+        node._spmPendingPrivacySave = null;
+      }
+    });
+    node._spmPendingPrivacySave = tracked;
+    return tracked;
+  }
+
+  async function encryptedSnapshotValue(snapshot) {
+    const normalized = normalizedSnapshot(snapshot);
+    return await encryptedOrReusePrivacyValue(node, SPM_PRIVACY_FIELD, normalized, async (plaintext) => {
+      const result = await privacyPost("encrypt", { state: plaintext });
+      return result.envelope;
+    });
+  }
+
   async function encryptAndSetWidget(snapshot, { allowClearOnFailure = false, renderAfter = false } = {}) {
     const sequence = ++encryptSequence;
     privacyBusy = true;
     try {
-      const result = await privacyPost("encrypt", { state: snapshot });
-      if (sequence !== encryptSequence) return;
-      setWidgetRawValue(node, dataWidget, JSON.stringify(result.envelope, null, 2));
+      const envelopeString = await encryptedSnapshotValue(snapshot);
+      if (sequence !== encryptSequence) return envelopeString;
+      setWidgetRawValue(node, dataWidget, envelopeString);
       status = "Privacy mode enabled.";
+      return envelopeString;
     } catch (error) {
       if (sequence !== encryptSequence) return;
       if (allowClearOnFailure) {
         state.privacyMode = false;
+        forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
         setWidgetValue(node, dataWidget, state);
       }
       status = `Privacy error: ${error.message}`;
+      return encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
     } finally {
       if (sequence === encryptSequence) {
         privacyBusy = false;
@@ -1014,6 +1293,7 @@ function enhanceNode(node) {
       const result = await privacyPost("decrypt", { payload: parseJsonObject(initialEncryptedValue) });
       state = normalizeState(result.state);
       state.privacyMode = true;
+      rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, initialEncryptedValue);
       privacyLocked = false;
       status = result.warnings?.length ? `Privacy mode unlocked with ${result.warnings.length} warning(s).` : "Privacy mode unlocked.";
       saveWithoutRender();
@@ -1034,7 +1314,7 @@ function enhanceNode(node) {
       status = "Encrypting prompt library...";
       privacyBusy = true;
       renderUi();
-      await encryptAndSetWidget(cloneState(normalizeState(state)), { allowClearOnFailure: true, renderAfter: true });
+      await trackPrivacySave(encryptAndSetWidget(cloneState(normalizeState(state)), { allowClearOnFailure: true, renderAfter: true }));
       return;
     }
     if (!confirm("Disable Privacy mode? This will save the prompt library in clear text inside the workflow.")) {
@@ -1048,10 +1328,56 @@ function enhanceNode(node) {
     save();
   }
 
+  function currentSerializedSpmData() {
+    if (privacyLocked) {
+      return encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
+    }
+    if (!state.privacyMode) {
+      return dataWidget.value;
+    }
+    const snapshot = normalizedSnapshot(state);
+    return rememberedPrivacyEnvelope(node, SPM_PRIVACY_FIELD, snapshot) || encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
+  }
+
+  function writeSerializedSpmData(info, value) {
+    const index = serializedWidgetIndex(node, dataWidget);
+    if (Array.isArray(info?.widgets_values) && index >= 0) {
+      info.widgets_values[index] = value;
+    }
+  }
+
+  function preparePrivacySerialization() {
+    if (privacyLocked) {
+      return Promise.resolve(encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value);
+    }
+    exposeExecutionState();
+    if (!state.privacyMode) {
+      return Promise.resolve(dataWidget.value);
+    }
+    return trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+  }
+
+  node._spmPreparePrivacySerialization = preparePrivacySerialization;
+  dataWidget.serializeValue = async function (...args) {
+    if (privacyLocked || state.privacyMode) {
+      return await preparePrivacySerialization();
+    }
+    if (typeof originalSerializeValue === "function") {
+      return await originalSerializeValue.apply(this, args);
+    }
+    return dataWidget.value;
+  };
+  node.onSerialize = function (info) {
+    const result = originalOnSerialize?.call(this, info);
+    writeSerializedSpmData(info, currentSerializedSpmData());
+    return result;
+  };
+
   function save(render = true) {
     state = normalizeState(state);
+    exposeExecutionState();
     if (state.privacyMode) {
-      void encryptAndSetWidget(cloneState(state), { renderAfter: false });
+      void trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
     } else {
       setWidgetValue(node, dataWidget, state);
     }
@@ -1086,8 +1412,9 @@ function enhanceNode(node) {
   }
 
   function saveWithoutRender() {
+    exposeExecutionState();
     if (state.privacyMode) {
-      void encryptAndSetWidget(cloneState(state), { renderAfter: false });
+      void trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
     } else {
       setWidgetValue(node, dataWidget, state);
     }
@@ -1684,7 +2011,81 @@ function enhanceNode(node) {
     };
     renderVariables();
 
+    function replaceVariableTokens(oldName, newName) {
+      if (oldName === newName) return;
+      const tokenPattern = new RegExp(`\\{\\{\\s*${oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g");
+      state.prompts.forEach((item) => {
+        item.text = item.text.replace(tokenPattern, `{{${newName}}}`);
+      });
+    }
+
+    function syncVariableRowBindings(row, name) {
+      if (!row || !name) return;
+      row.dataset.varRow = name;
+      const bindings = [
+        ["[data-var-name]", "varName"],
+        ["[data-var-mode]", "varMode"],
+        ["[data-var-values]", "varValues"],
+        ["[data-var-fixed]", "varFixed"],
+        ["[data-var-fallback]", "varFallback"],
+        ["[data-var-description]", "varDescription"],
+      ];
+      for (const [selector, key] of bindings) {
+        const element = row.querySelector(selector);
+        if (element) element.dataset[key] = name;
+      }
+      const removeButton = row.querySelector("[data-dialog-action='remove-variable']");
+      if (removeButton) removeButton.dataset.var = name;
+    }
+
+    function readVariableRow(row) {
+      const currentName = row?.dataset.varRow || row?.querySelector("[data-var-name]")?.dataset.varName || "";
+      const nameElement = row?.querySelector("[data-var-name]");
+      const modeElement = row?.querySelector("[data-var-mode]");
+      const valuesElement = row?.querySelector("[data-var-values]");
+      const fixedElement = row?.querySelector("[data-var-fixed]");
+      const fallbackElement = row?.querySelector("[data-var-fallback]");
+      const descriptionElement = row?.querySelector("[data-var-description]");
+      return {
+        currentName,
+        requestedName: String(nameElement?.value || "").trim(),
+        mode: MODES.includes(modeElement?.value) ? modeElement.value : "random",
+        values: normalizeValues(valuesElement?.value || ""),
+        fixedValue: fixedElement?.value || null,
+        fallback: fallbackElement?.value || "",
+        description: descriptionElement?.value || "",
+      };
+    }
+
+    function commitVariableRow(row) {
+      const draft = readVariableRow(row);
+      if (!draft.currentName || !state.variables[draft.currentName]) return "";
+      const requestedNameIsAvailable = draft.requestedName === draft.currentName || !state.variables[draft.requestedName];
+      const nextName = VALID_NAME_RE.test(draft.requestedName) && requestedNameIsAvailable ? draft.requestedName : draft.currentName;
+      if (nextName !== draft.currentName) {
+        state.variables[nextName] = state.variables[draft.currentName];
+        delete state.variables[draft.currentName];
+        replaceVariableTokens(draft.currentName, nextName);
+      }
+      state.variables[nextName] = {
+        mode: draft.mode,
+        values: draft.values,
+        fixedValue: draft.fixedValue,
+        fallback: draft.fallback,
+        description: draft.description,
+      };
+      syncVariableRowBindings(row, nextName);
+      return nextName;
+    }
+
+    function commitVariableRows() {
+      for (const row of modal.querySelectorAll("[data-var-row]")) {
+        commitVariableRow(row);
+      }
+    }
+
     const close = () => {
+      commitVariableRows();
       state.folders.forEach((folder) => {
         if (!String(folder.name || "").trim()) folder.name = "Folder";
       });
@@ -1692,35 +2093,23 @@ function enhanceNode(node) {
       save();
     };
     modal.addEventListener("input", (event) => {
-      if (event.target.dataset.varValues) state.variables[event.target.dataset.varValues].values = normalizeValues(event.target.value);
-      if (event.target.dataset.varFixed) state.variables[event.target.dataset.varFixed].fixedValue = event.target.value || null;
-      if (event.target.dataset.varFallback) state.variables[event.target.dataset.varFallback].fallback = event.target.value;
-      if (event.target.dataset.varDescription) state.variables[event.target.dataset.varDescription].description = event.target.value;
-      if (event.target.dataset.varName) {
-        const oldName = event.target.dataset.varName;
-        const newName = event.target.value.trim();
-        if (VALID_NAME_RE.test(newName) && !state.variables[newName]) {
-          state.variables[newName] = state.variables[oldName];
-          delete state.variables[oldName];
-          const tokenPattern = new RegExp(`\\{\\{\\s*${oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`, "g");
-          state.prompts.forEach((item) => {
-            item.text = item.text.replace(tokenPattern, `{{${newName}}}`);
-          });
-          event.target.dataset.varName = newName;
-        }
-      }
+      const row = event.target.closest?.("[data-var-row]");
+      if (!row) return;
+      commitVariableRow(row);
       saveWithoutRender();
     });
     modal.addEventListener("change", (event) => {
-      if (event.target.dataset.varMode) {
-        state.variables[event.target.dataset.varMode].mode = event.target.value;
-        saveWithoutRender();
-      }
+      const row = event.target.closest?.("[data-var-row]");
+      if (!row) return;
+      commitVariableRow(row);
+      saveWithoutRender();
     });
     modal.addEventListener("click", (event) => {
-      const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
+      const actionButton = event.target.closest?.("[data-dialog-action]");
+      const action = actionButton?.dataset.dialogAction;
       if (action === "save-close") close();
       if (action === "add-variable") {
+        commitVariableRows();
         let name = "variable";
         let index = 2;
         while (state.variables[name]) {
@@ -1732,7 +2121,10 @@ function enhanceNode(node) {
         renderVariables();
       }
       if (action === "remove-variable") {
-        delete state.variables[event.target.dataset.var];
+        const removeRow = actionButton.closest?.("[data-var-row]");
+        commitVariableRows();
+        const removeName = removeRow?.dataset.varRow || actionButton.dataset.var;
+        delete state.variables[removeName];
         saveWithoutRender();
         renderVariables();
       }
@@ -1994,11 +2386,13 @@ function enhanceNode(node) {
       await setPrivacyMode(privacyToggle.checked);
       return;
     }
-    const action = event.target.closest?.("[data-action]")?.dataset.action;
+    const actionButton = event.target.closest?.("[data-action]");
+    const action = actionButton?.dataset.action;
     if (action === "reset-private-data") {
       if (!confirm("Reset encrypted prompt data for this node? This discards the encrypted library if the local key cannot be restored.")) return;
       privacyLocked = false;
       privacyBusy = false;
+      forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
       state = defaultState();
       state.privacyMode = false;
       status = "Encrypted prompt data reset.";
@@ -2041,7 +2435,7 @@ function enhanceNode(node) {
         }
         state.variables[name] = { mode: "random", values: ["value"], fixedValue: null, fallback: "", description: "" };
       } else if (action === "remove-variable") {
-        delete state.variables[event.target.dataset.var];
+        delete state.variables[actionButton.dataset.var];
       } else if (action === "copy-resolved") {
         await copyText(currentResolution().resolved_prompt, "[data-role='json-box']");
         return;
@@ -2235,11 +2629,13 @@ function enhanceNode(node) {
 }
 
 scheduleSpmSeedQueuePatch();
+scheduleSpmGraphToPromptPatch();
 
 app.registerExtension({
   name: EXTENSION_NAME,
   setup() {
     scheduleSpmSeedQueuePatch("setup");
+    scheduleSpmGraphToPromptPatch("setup");
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_CLASS) return;
