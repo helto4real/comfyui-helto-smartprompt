@@ -263,6 +263,201 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
         self.assertIn("if (!state.privacyMode) {\n      return dataWidget.value;\n    }", source)
         self.assertIn("if (!state.privacyMode) {\n      return Promise.resolve(dataWidget.value);\n    }", source)
 
+    def test_import_export_helpers_package_privacy_and_merge_behaviour(self):
+        helper_path = ROOT / "web/js/smart_prompt_manager.js"
+        source = helper_path.read_text(encoding="utf-8")
+        import_start = source.index("async function importLibraryText(raw, replace)")
+        import_end = source.index("async function importLibraryFile(file, replace)", import_start)
+        import_library = source[import_start:import_end]
+
+        self.assertIn('const result = await privacyPost("decrypt", { payload: parseJsonObject(imported.spmData) });', import_library)
+        self.assertIn("privacyLocked = false;", import_library)
+        self.assertIn("rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, imported.spmData)", import_library)
+        self.assertIn("setWidgetRawValue(node, dataWidget, imported.spmData)", import_library)
+        self.assertIn("syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true })", import_library)
+        self.assertIn('status = importStatus("Imported encrypted library", result.warnings);', import_library)
+        self.assertIn("Imported encrypted library, but could not decrypt it with the local privacy key", import_library)
+        self.assertIn('status = `Error: ${error.message}`;', source)
+        self.assertIn('const input = document.createElement("input");', source)
+        self.assertIn('input.type = "file";', source)
+        self.assertIn('await importLibraryFile(input.files?.[0], replace);', source)
+        self.assertNotIn('data-role="import-file"', source)
+        self.assertIn('data-library-action="export"', source)
+        self.assertIn('data-library-action="merge"', source)
+        self.assertIn('data-library-action="replace"', source)
+        self.assertNotIn('data-action="export-library"', source)
+        self.assertIn("if (isLibraryImportText(raw))", source)
+        library_handler_start = source.index("const libraryButton = event.target.closest?.(\"[data-library-action]\");")
+        library_handler_end = source.index("const actionButton = event.target.closest?.(\"[data-action]\");", library_handler_start)
+        library_handler = source[library_handler_start:library_handler_end]
+        self.assertIn("await exportLibraryFile();", library_handler)
+        self.assertNotIn("selectedPromptJson", library_handler)
+        self.assertNotIn("promptJson", library_handler)
+
+        script = r"""
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const source = fs.readFileSync(process.argv.at(-1), "utf8");
+const helperStart = source.indexOf("function nowIso()");
+const helperEnd = source.indexOf("// ---- End import/export helpers ----");
+const suffixStart = source.indexOf("function suffixName(");
+const suffixEnd = source.indexOf("function setWidgetValue", suffixStart);
+assert.notEqual(helperStart, -1);
+assert.notEqual(helperEnd, -1);
+assert.notEqual(suffixStart, -1);
+assert.notEqual(suffixEnd, -1);
+const helperSource = `${source.slice(helperStart, helperEnd).replace(/^export /gm, "")}\n${source.slice(suffixStart, suffixEnd)}`;
+
+const factory = new Function(`
+const VALID_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const MODES = ["random", "fixed", "cycle"];
+const VIRTUAL_FOLDERS = [
+  { id: "all", name: "All" },
+  { id: "unsorted", name: "Unsorted" },
+  { id: "favorites", name: "Favorites" },
+];
+const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
+const SPM_EXPORT_VERSION = 1;
+let uuidCounter = 0;
+const crypto = {
+  randomUUID() {
+    uuidCounter += 1;
+    return \`00000000-0000-0000-0000-\${String(uuidCounter).padStart(12, "0")}\`;
+  },
+};
+${helperSource}
+return {
+  buildSpmExportPackage,
+  isLibraryImportText,
+  parseSpmImport,
+  mergeImportedLibraryState,
+  spmExportFileName,
+};`);
+
+const {
+  buildSpmExportPackage,
+  isLibraryImportText,
+  parseSpmImport,
+  mergeImportedLibraryState,
+  spmExportFileName,
+} = factory();
+
+function prompt(id, title, folderId = "folder_current") {
+  return {
+    id,
+    title,
+    text: `Prompt ${title}`,
+    description: "",
+    folderId,
+    tags: [],
+    favorite: false,
+    locked: false,
+    hidden: false,
+    createdAt: "2026-07-01T00:00:00Z",
+    updatedAt: "2026-07-01T00:00:00Z",
+  };
+}
+
+function variable(values) {
+  return { mode: "random", values, fixedValue: null, fallback: "", description: "" };
+}
+
+function state(prompts, variables = { mood: variable(["calm"]) }) {
+  return {
+    version: 1,
+    selectedFolderId: "all",
+    selectedPromptId: prompts[0]?.id || "",
+    search: "",
+    privacyMode: false,
+    folders: [{ id: "folder_current", name: "Portraits", hidden: false }],
+    prompts,
+    variables,
+    cycleState: { mood: 1 },
+    ui: { collapsedSections: {} },
+  };
+}
+
+function envelope(id) {
+  return JSON.stringify({
+    version: 1,
+    schema: "comfyui-helto-prompts.smart-prompt-manager",
+    encrypted: true,
+    algorithm: "AES-256-GCM",
+    keyId: "test-key",
+    nonce: `nonce-${id}`,
+    ciphertext: `ciphertext-${id}`,
+  }, null, 2);
+}
+
+const exportedAt = "2026-07-01T12:34:56Z";
+const plaintextState = state([
+  prompt("prompt_current", "Cinematic portrait"),
+  prompt("prompt_second", "Wide landscape"),
+]);
+const plaintextPackage = buildSpmExportPackage(plaintextState, false, exportedAt);
+assert.equal(plaintextPackage.format, "comfyui-helto-prompts.smart-prompt-manager.export");
+assert.equal(plaintextPackage.version, 1);
+assert.equal(plaintextPackage.encrypted, false);
+assert.equal(plaintextPackage.exportedAt, exportedAt);
+assert.equal(plaintextPackage.spm_data.prompts[0].title, "Cinematic portrait");
+assert.equal(plaintextPackage.spm_data.prompts[1].title, "Wide landscape");
+assert.equal(plaintextPackage.spm_data.prompts.length, 2);
+assert.equal(spmExportFileName(exportedAt), "smart-prompt-manager-library-2026-07-01T12-34-56Z.json");
+
+const parsedPlaintext = parseSpmImport(JSON.stringify(plaintextPackage));
+assert.equal(parsedPlaintext.encrypted, false);
+assert.equal(parsedPlaintext.state.prompts[0].title, "Cinematic portrait");
+assert.equal(parsedPlaintext.state.prompts[1].title, "Wide landscape");
+assert.equal(parsedPlaintext.state.prompts.length, 2);
+assert.equal(isLibraryImportText(JSON.stringify(plaintextPackage)), true);
+assert.equal(isLibraryImportText(JSON.stringify(plaintextState)), true);
+
+const singlePromptJson = JSON.stringify({
+  version: 1,
+  prompt: prompt("prompt_only", "Only one"),
+  variables: { mood: variable(["calm"]) },
+});
+assert.equal(isLibraryImportText(singlePromptJson), false);
+assert.equal(isLibraryImportText("not json"), false);
+assert.throws(
+  () => parseSpmImport(singlePromptJson),
+  /single-prompt JSON/,
+);
+
+const encryptedEnvelope = envelope("private");
+const privatePackage = buildSpmExportPackage(encryptedEnvelope, true, exportedAt);
+assert.equal(privatePackage.encrypted, true);
+assert.equal(privatePackage.spm_data, encryptedEnvelope);
+assert.equal(privatePackage.spm_data.includes("Cinematic portrait"), false);
+
+const parsedEncrypted = parseSpmImport(JSON.stringify(privatePackage));
+assert.equal(parsedEncrypted.encrypted, true);
+assert.equal(parsedEncrypted.spmData, encryptedEnvelope);
+assert.equal(parsedEncrypted.state, null);
+
+const current = state([
+  prompt("prompt_current", "Same"),
+  prompt("prompt_imported", "Same - imported"),
+], { mood: variable(["calm"]) });
+const incoming = state([prompt("prompt_incoming", "Same")], {
+  mood: variable(["dramatic"]),
+  weather: variable(["rain"]),
+});
+incoming.cycleState.weather = 3;
+const merged = mergeImportedLibraryState(current, incoming);
+assert.equal(merged.state.prompts.length, 3);
+assert.equal(merged.state.prompts[2].title, "Same - imported 2");
+assert.notEqual(merged.state.prompts[2].id, "prompt_incoming");
+assert.equal(merged.state.prompts[2].folderId, merged.state.folders[1].id);
+assert.deepEqual(merged.state.variables.weather.values, ["rain"]);
+assert.equal(merged.state.cycleState.weather, 3);
+assert.deepEqual(merged.state.variables.mood.values, ["calm"]);
+assert.equal(merged.warnings.length, 1);
+assert.match(merged.warnings[0], /not overwritten/);
+"""
+        subprocess.run(["node", "--input-type=module", "-", str(helper_path)], input=script, text=True, check=True)
+
     def test_privacy_envelope_memo_helper_behaviour(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"
         script = r"""

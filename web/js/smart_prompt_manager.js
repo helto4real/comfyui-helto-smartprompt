@@ -9,6 +9,8 @@ const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
 const SEED_MAX = Number.MAX_SAFE_INTEGER;
 const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
 const SPM_PRIVACY_FIELD = "spm_data";
+const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
+const SPM_EXPORT_VERSION = 1;
 const SPM_SEED_QUEUE_WRAPPER_KEY = "__smartPromptManagerSeedQueuePromptWrapper";
 const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallScheduled";
 const SPM_GRAPH_TO_PROMPT_WRAPPER_KEY = "__smartPromptManagerGraphToPromptWrapper";
@@ -273,6 +275,11 @@ function isEncryptedStateValue(value) {
   return parsed.encrypted === true && parsed.schema === "comfyui-helto-prompts.smart-prompt-manager";
 }
 
+function clonePlain(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
 // ---- Privacy envelope memo helpers ----
 const SPM_PRIVACY_MEMOS = new WeakMap();
 
@@ -463,6 +470,155 @@ function normalizeState(data) {
   };
 }
 
+// ---- Import/export helpers ----
+function jsonString(value) {
+  return typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2);
+}
+
+function normalizedStateString(value) {
+  return JSON.stringify(parsePlainLibraryState(value), null, 2);
+}
+
+function parsePlainLibraryState(value) {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.prompts)) {
+    throw new Error("Smart Prompt Manager library import must contain a prompts array. Use Paste prompt JSON for single-prompt JSON.");
+  }
+  return normalizeState(parsed);
+}
+
+export function buildSpmExportPackage(spmDataValue, encrypted, exportedAt = nowIso()) {
+  return {
+    format: SPM_EXPORT_FORMAT,
+    version: SPM_EXPORT_VERSION,
+    encrypted: Boolean(encrypted),
+    spm_data: encrypted
+      ? encryptedPrivacyEnvelopeString(spmDataValue) || jsonString(spmDataValue)
+      : parsePlainLibraryState(spmDataValue),
+    exportedAt,
+  };
+}
+
+function isSpmExportPackage(value) {
+  return value && typeof value === "object" && value.format === SPM_EXPORT_FORMAT && value.version === SPM_EXPORT_VERSION;
+}
+
+function isLibraryImportObject(value) {
+  return isSpmExportPackage(value) || isPrivacyEnvelopeValue(value) || Array.isArray(value?.prompts);
+}
+
+function isLibraryImportText(value) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try {
+    return isLibraryImportObject(JSON.parse(value));
+  } catch {
+    return false;
+  }
+}
+
+export function parseSpmImport(raw) {
+  const parsed = JSON.parse(String(raw ?? ""));
+  if (isSpmExportPackage(parsed)) {
+    const envelopeString = encryptedPrivacyEnvelopeString(parsed.spm_data);
+    const encrypted = Boolean(parsed.encrypted) || Boolean(envelopeString);
+    if (encrypted) {
+      const spmData = envelopeString || jsonString(parsed.spm_data);
+      if (!encryptedPrivacyEnvelopeString(spmData)) {
+        throw new Error("Encrypted Smart Prompt Manager export does not contain a valid encrypted spm_data payload.");
+      }
+      return { encrypted: true, spmData, state: null };
+    }
+    return {
+      encrypted: false,
+      spmData: normalizedStateString(parsed.spm_data),
+      state: parsePlainLibraryState(parsed.spm_data),
+    };
+  }
+  const envelopeString = encryptedPrivacyEnvelopeString(parsed);
+  if (envelopeString) return { encrypted: true, spmData: envelopeString, state: null };
+  if (parsed.prompt && !Array.isArray(parsed.prompts)) {
+    throw new Error("This is single-prompt JSON. Use Paste prompt JSON, not library import.");
+  }
+  return {
+    encrypted: false,
+    spmData: normalizedStateString(parsed),
+    state: parsePlainLibraryState(parsed),
+  };
+}
+
+function sameSemanticValue(left, right) {
+  return JSON.stringify(stableCanonicalValue(left)) === JSON.stringify(stableCanonicalValue(right));
+}
+
+export function mergeImportedLibraryState(current, incoming) {
+  const result = normalizeState(current);
+  const imported = normalizeState(incoming);
+  const warnings = [];
+  const virtualFolderIds = new Set(VIRTUAL_FOLDERS.map((folder) => folder.id));
+
+  const folderMap = {};
+  const existingFolderIds = new Set(result.folders.map((folder) => folder.id));
+  for (const folder of imported.folders) {
+    const copy = clonePlain(folder);
+    const oldId = copy.id;
+    const existingNames = result.folders.map((item) => item.name);
+    if (existingFolderIds.has(copy.id) || virtualFolderIds.has(copy.id)) copy.id = makeId("folder");
+    if (existingNames.some((name) => name.toLowerCase() === copy.name.toLowerCase())) {
+      copy.name = suffixName(copy.name, existingNames);
+    }
+    folderMap[oldId] = copy.id;
+    existingFolderIds.add(copy.id);
+    result.folders.push(copy);
+  }
+
+  let firstImportedPromptId = "";
+  for (const prompt of imported.prompts) {
+    const existingTitles = result.prompts.map((item) => item.title);
+    const copy = {
+      ...clonePlain(prompt),
+      id: makeId("prompt"),
+      folderId: folderMap[prompt.folderId] || "",
+    };
+    if (existingTitles.some((title) => title.toLowerCase() === copy.title.toLowerCase())) {
+      copy.title = suffixName(copy.title, existingTitles, " - imported");
+    }
+    if (!firstImportedPromptId) firstImportedPromptId = copy.id;
+    result.prompts.push(copy);
+  }
+
+  for (const [name, definition] of Object.entries(imported.variables)) {
+    if (!result.variables[name]) {
+      result.variables[name] = clonePlain(definition);
+      if (Object.prototype.hasOwnProperty.call(imported.cycleState, name)) {
+        result.cycleState[name] = clonePlain(imported.cycleState[name]);
+      }
+    } else if (!sameSemanticValue(result.variables[name], definition)) {
+      warnings.push(`Variable '${name}' already exists and was not overwritten.`);
+    }
+  }
+
+  if (!result.selectedPromptId && firstImportedPromptId) result.selectedPromptId = firstImportedPromptId;
+  return { state: result, warnings };
+}
+
+function spmExportFileName(exportedAt = nowIso()) {
+  return `smart-prompt-manager-library-${String(exportedAt).replace(/[^0-9A-Za-z]+/g, "-").replace(/^-|-$/g, "")}.json`;
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+// ---- End import/export helpers ----
+
 function selectedPrompt(state) {
   return state.prompts.find((prompt) => prompt.id === state.selectedPromptId) || state.prompts[0] || null;
 }
@@ -571,13 +727,14 @@ function validateState(state) {
   return warnings;
 }
 
-function suffixName(name, existing) {
+function suffixName(name, existing, suffix = "copy") {
   const existingLower = new Set(existing.map((value) => String(value).toLowerCase()));
   const base = String(name || "Untitled prompt").trim() || "Untitled prompt";
-  let candidate = `${base} copy`;
+  const suffixText = String(suffix || "copy").startsWith(" ") ? String(suffix || "copy") : ` ${suffix || "copy"}`;
+  let candidate = `${base}${suffixText}`;
   let index = 2;
   while (existingLower.has(candidate.toLowerCase())) {
-    candidate = `${base} copy ${index}`;
+    candidate = `${base}${suffixText} ${index}`;
     index += 1;
   }
   return candidate;
@@ -1314,6 +1471,19 @@ function enhanceNode(node) {
     return cloneState(normalizeState(value));
   }
 
+  function fullLibrarySnapshot() {
+    const liveSnapshot = normalizedSnapshot(state);
+    if (!encryptedPrivacyEnvelopeString(dataWidget.value)) {
+      try {
+        const widgetSnapshot = parsePlainLibraryState(dataWidget.value);
+        if (widgetSnapshot.prompts.length > liveSnapshot.prompts.length) return widgetSnapshot;
+      } catch {
+        // Fall back to the live editor state if the hidden widget is stale or malformed.
+      }
+    }
+    return liveSnapshot;
+  }
+
   function exposeExecutionState() {
     if (privacyLocked) return;
     node._spmExecutionState = normalizedSnapshot(state);
@@ -1647,35 +1817,116 @@ function enhanceNode(node) {
     save();
   }
 
-  function mergeLibrary(raw, replace) {
-    const incoming = normalizeState(JSON.parse(raw));
+  function importStatus(message, warnings = []) {
+    return warnings.length ? `${message} ${warnings.length} warning(s).` : `${message}.`;
+  }
+
+  async function exportLibraryFile() {
+    const encrypted = privacyLocked || state.privacyMode || Boolean(encryptedPrivacyEnvelopeString(dataWidget.value));
+    const spmData = encrypted ? await preparePrivacySerialization() : fullLibrarySnapshot();
+    if (encrypted && !encryptedPrivacyEnvelopeString(spmData)) {
+      throw new Error("Privacy export could not create an encrypted Smart Prompt Manager payload.");
+    }
+    const exportedAt = nowIso();
+    const payload = buildSpmExportPackage(spmData, encrypted, exportedAt);
+    const text = JSON.stringify(payload, null, 2);
+    downloadTextFile(spmExportFileName(exportedAt), text);
+    status = "Library JSON exported.";
+    renderUi();
+    const fallback = root.querySelector("[data-role='json-box']");
+    if (fallback) fallback.value = text;
+  }
+
+  async function importLibraryText(raw, replace) {
+    const imported = parseSpmImport(raw);
+    if (imported.encrypted) {
+      if (replace) {
+        try {
+          const result = await privacyPost("decrypt", { payload: parseJsonObject(imported.spmData) });
+          encryptSequence += 1;
+          privacyBusy = false;
+          privacyLocked = false;
+          state = normalizeState(result.state);
+          state.privacyMode = true;
+          rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, imported.spmData);
+          setWidgetRawValue(node, dataWidget, imported.spmData);
+          syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true });
+          exposeExecutionState();
+          status = importStatus("Imported encrypted library", result.warnings);
+          renderUi();
+        } catch (error) {
+          encryptSequence += 1;
+          privacyBusy = false;
+          privacyLocked = true;
+          forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
+          delete node._spmExecutionState;
+          state = defaultState();
+          state.privacyMode = true;
+          setWidgetRawValue(node, dataWidget, imported.spmData);
+          syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true });
+          status = `Imported encrypted library, but could not decrypt it with the local privacy key: ${error.message}`;
+          renderUi();
+        }
+        return;
+      }
+      const result = await privacyPost("decrypt", { payload: parseJsonObject(imported.spmData) });
+      const merged = mergeImportedLibraryState(state, result.state);
+      state = merged.state;
+      status = importStatus("Merged encrypted library", merged.warnings);
+      save();
+      return;
+    }
     if (replace) {
-      state = incoming;
+      forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
+      state = imported.state;
       status = "Imported library.";
       save();
       return;
     }
-    const folderMap = {};
-    for (const folder of incoming.folders) {
-      const copy = { ...folder };
-      const existingNames = state.folders.map((item) => item.name);
-      if (state.folders.some((item) => item.id === copy.id)) copy.id = makeId("folder");
-      if (existingNames.some((name) => name.toLowerCase() === copy.name.toLowerCase())) copy.name = suffixName(copy.name, existingNames);
-      folderMap[folder.id] = copy.id;
-      state.folders.push(copy);
-    }
-    for (const prompt of incoming.prompts) {
-      const copy = { ...prompt, id: makeId("prompt"), folderId: folderMap[prompt.folderId] || "" };
-      if (state.prompts.some((item) => item.title.toLowerCase() === copy.title.toLowerCase())) {
-        copy.title = suffixName(copy.title, state.prompts.map((item) => item.title));
-      }
-      state.prompts.push(copy);
-    }
-    for (const [name, definition] of Object.entries(incoming.variables)) {
-      if (!state.variables[name]) state.variables[name] = definition;
-    }
-    status = "Merged library JSON.";
+    const merged = mergeImportedLibraryState(state, imported.state);
+    state = merged.state;
+    status = importStatus("Merged library JSON", merged.warnings);
     save();
+  }
+
+  async function importLibraryFile(file, replace) {
+    if (!file) return;
+    await importLibraryText(await file.text(), replace);
+  }
+
+  function openImportPicker(replace) {
+    const fallback = root.querySelector("[data-role='json-box']");
+    const raw = fallback?.value?.trim();
+    if (isLibraryImportText(raw)) {
+      void importLibraryText(raw, replace).catch((error) => {
+        status = `Error: ${error.message}`;
+        renderUi();
+      });
+      return;
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.style.position = "fixed";
+    input.style.left = "-10000px";
+    input.style.top = "0";
+    input.style.opacity = "0";
+    input.addEventListener(
+      "change",
+      async () => {
+        try {
+          await importLibraryFile(input.files?.[0], replace);
+        } catch (error) {
+          status = `Error: ${error.message}`;
+          renderUi();
+        } finally {
+          input.remove();
+        }
+      },
+      { once: true },
+    );
+    document.body.appendChild(input);
+    input.click();
   }
 
   function updateAutocomplete(textarea) {
@@ -2407,9 +2658,9 @@ function enhanceNode(node) {
       </details>
       <details class="spm-section"><summary>Import / Export</summary>
         <div class="spm-row-wrap">
-          ${iconButton("export", "Export library", 'data-action="export-library"')}
-          ${iconButton("importMerge", "Import and merge library", 'data-action="import-merge"')}
-          ${iconButton("importReplace", "Import and replace library", 'data-action="import-replace"')}
+          ${iconButton("export", "Export library", 'data-library-action="export"')}
+          ${iconButton("importMerge", "Import and merge library", 'data-library-action="merge"')}
+          ${iconButton("importReplace", "Import and replace library", 'data-library-action="replace"')}
           ${iconButton("paste", "Paste prompt JSON", 'data-action="paste-prompt-json"')}
         </div>
         <textarea class="spm-copybox" data-role="json-box" placeholder="Import/export/copy fallback JSON"></textarea>
@@ -2457,6 +2708,22 @@ function enhanceNode(node) {
     if (privacyToggle) {
       event.stopPropagation();
       await setPrivacyMode(privacyToggle.checked);
+      return;
+    }
+    const libraryButton = event.target.closest?.("[data-library-action]");
+    const libraryAction = libraryButton?.dataset.libraryAction;
+    if (libraryAction) {
+      if (privacyLocked && libraryAction !== "export") return;
+      try {
+        if (libraryAction === "export") {
+          await exportLibraryFile();
+        } else if (libraryAction === "merge" || libraryAction === "replace") {
+          openImportPicker(libraryAction === "replace");
+        }
+      } catch (error) {
+        status = `Error: ${error.message}`;
+        renderUi();
+      }
       return;
     }
     const actionButton = event.target.closest?.("[data-action]");
@@ -2515,16 +2782,8 @@ function enhanceNode(node) {
       } else if (action === "copy-prompt-json") {
         await copyText(selectedPromptJson(), "[data-role='json-box']");
         return;
-      } else if (action === "export-library") {
-        const text = JSON.stringify(state, null, 2);
-        root.querySelector("[data-role='json-box']").value = text;
-        await copyText(text, "[data-role='json-box']");
-        return;
       } else if (action === "paste-prompt-json") {
         addPromptFromJson(root.querySelector("[data-role='json-box']").value);
-        return;
-      } else if (action === "import-merge" || action === "import-replace") {
-        mergeLibrary(root.querySelector("[data-role='json-box']").value, action === "import-replace");
         return;
       }
       save();
