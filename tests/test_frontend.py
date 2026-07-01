@@ -10,10 +10,12 @@ class SmartPromptManagerFrontendTests(unittest.TestCase):
     def test_seed_frontend_randomizes_live_seed_before_queue(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
-        self.assertIn("const SEED_MAX = Number.MAX_SAFE_INTEGER;", source)
+        self.assertIn("const SEED_MAX = 1125899906842624;", source)
+        self.assertIn("Math.floor(randomUnit53() * (SEED_MAX - 1)) + 1", source)
         self.assertIn("// ---- Seed queue helpers ----", source)
         self.assertIn("function randomizeSpmSeedsBeforeQueue()", source)
         self.assertIn('liveSeedControlMode(node) !== "randomize"', source)
+        self.assertIn("delete node._spmQueuedSeed;", source)
         self.assertIn("writeSpmSeedValue(node, seed)", source)
         self.assertIn("suspendSeedControlCallbacks(controlWidget)", source)
         self.assertIn("restoreQueuedSpmSeeds(queuedSeeds)", source)
@@ -29,6 +31,30 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const source = fs.readFileSync(process.argv.at(-1), "utf8");
+const randomStart = source.indexOf("function randomSeed()");
+const randomEnd = source.indexOf("function widgetByName", randomStart);
+assert.notEqual(randomStart, -1);
+assert.notEqual(randomEnd, -1);
+const randomSeedSource = source.slice(randomStart, randomEnd);
+const randomFactory = new Function(`
+const SEED_MAX = 1125899906842624;
+let unit = 0;
+function randomUnit53() {
+  return unit;
+}
+${randomSeedSource}
+return {
+  randomSeed,
+  setUnit(value) {
+    unit = value;
+  },
+};`);
+const random = randomFactory();
+random.setUnit(0);
+assert.equal(random.randomSeed(), 1);
+random.setUnit(1 - Number.EPSILON);
+assert.equal(random.randomSeed(), 1125899906842623);
+
 const start = source.indexOf("// ---- Seed queue helpers ----");
 const end = source.indexOf("// ---- End seed queue helpers ----");
 assert.notEqual(start, -1);
@@ -65,6 +91,7 @@ ${helperSource}
 const SEED_CONTROL_MODES_FOR_TESTS = SEED_CONTROL_MODES;
 return {
   SEED_CONTROL_MODES_FOR_TESTS,
+  clearQueuedSeedUnlessRandomize,
   installSpmSeedSerializedSync,
   installSpmSeedControlPersistence,
   liveSeedControlMode,
@@ -82,6 +109,7 @@ const NODE_CLASS = "SmartPromptManager";
 
 const {
   SEED_CONTROL_MODES_FOR_TESTS,
+  clearQueuedSeedUnlessRandomize,
   installSpmSeedSerializedSync,
   installSpmSeedControlPersistence,
   liveSeedControlMode,
@@ -99,6 +127,8 @@ assert.deepEqual(SEED_CONTROL_MODES_FOR_TESTS, SEED_CONTROL_MODES);
 function makeNode(mode, options = {}) {
   const seed = options.seed ?? 1234;
   const serializedSeed = options.serializedSeed ?? seed;
+  const reroll = options.reroll ?? 0;
+  const serializedReroll = options.serializedReroll ?? reroll;
   const dataWidget = { name: "spm_data", value: "{}", options: {} };
   const seedWidget = {
     name: "seed",
@@ -110,10 +140,15 @@ function makeNode(mode, options = {}) {
       this.lastCallbackValue = value;
     },
   };
-  const rerollWidget = { name: "reroll", value: 0, options: {} };
+  const rerollWidget = { name: "reroll", value: reroll, options: {} };
   const controlWidget = {
     name: options.controlName ?? "control_after_generate",
     value: mode,
+    callbackCalls: 0,
+    callback(value) {
+      this.callbackCalls += 1;
+      this.lastCallbackValue = value;
+    },
     options: {
       values: options.controlValues ?? SEED_CONTROL_MODES,
       serialize: false,
@@ -125,20 +160,25 @@ function makeNode(mode, options = {}) {
   const node = {
     type: NODE_CLASS,
     widgets: [dataWidget, seedWidget, rerollWidget, controlWidget],
-    widgets_values: ["{}", serializedSeed, 0],
-    last_serialization: { widgets_values: ["{}", serializedSeed, 0] },
+    widgets_values: ["{}", serializedSeed, serializedReroll],
+    last_serialization: { widgets_values: ["{}", serializedSeed, serializedReroll] },
     graph: {
       incrementVersion() {},
       setDirtyCanvas() {},
     },
   };
-  return { node, seedWidget, controlWidget, seed };
+  return { node, seedWidget, rerollWidget, controlWidget, seed, reroll };
 }
 
 {
   const info = { widgets_values: ["{}", 2222, "fixed", 7] };
   normalizeSpmWidgetsValuesForConfigure(info);
   assert.deepEqual(info.widgets_values, ["{}", 2222, 7]);
+  const { node, seedWidget, rerollWidget } = makeNode("fixed", { seed: info.widgets_values[1], reroll: info.widgets_values[2] });
+  syncSpmSerializedWidgetValues(node);
+  assert.equal(seedWidget.value, 2222);
+  assert.equal(rerollWidget.value, 7);
+  assert.deepEqual(node.widgets_values, ["{}", 2222, 7]);
 }
 
 {
@@ -147,11 +187,24 @@ function makeNode(mode, options = {}) {
   assert.deepEqual(info.widgets_values, ["{}", 2222, 7]);
 }
 
+{
+  const info = { widgets_values: ["{}", 1357, 11] };
+  normalizeSpmWidgetsValuesForConfigure(info);
+  assert.deepEqual(info.widgets_values, ["{}", 1357, 11]);
+  const { node, seedWidget, rerollWidget } = makeNode("fixed", { seed: info.widgets_values[1], reroll: info.widgets_values[2] });
+  syncSpmSerializedWidgetValues(node);
+  assert.equal(seedWidget.value, 1357);
+  assert.equal(rerollWidget.value, 11);
+  assert.deepEqual(node.widgets_values, ["{}", 1357, 11]);
+}
+
 for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   const { node, seedWidget, controlWidget, seed } = makeNode(mode, { seed: 2222, serializedSeed: 1111 });
+  node._spmQueuedSeed = { seed: 987654321, at: Date.now() };
   setGraphNodesForTest([node]);
   const queued = randomizeSpmSeedsBeforeQueue();
   assert.equal(queued.length, 0, `${mode} must not queue an SPM random seed`);
+  assert.equal(node._spmQueuedSeed, undefined, `${mode} must clear stale queued random seed state`);
   assert.equal(seedWidget.value, seed, `${mode} must leave the live seed unchanged`);
   assert.equal(node.widgets_values[1], seed, `${mode} must sync serialized seed to live seed`);
   assert.equal(node.last_serialization.widgets_values[1], seed, `${mode} must sync last serialized seed to live seed`);
@@ -168,6 +221,13 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   assert.equal(node.widgets_values[1], seed);
   assert.equal(node.last_serialization.widgets_values[1], seed);
   assert.equal(controlWidget.serialize, false);
+}
+
+{
+  const { node } = makeNode("fixed");
+  node._spmQueuedSeed = { seed: 9999, at: Date.now() };
+  clearQueuedSeedUnlessRandomize(node);
+  assert.equal(node._spmQueuedSeed, undefined);
 }
 
 {
@@ -211,6 +271,31 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   assert.equal(controlWidget.beforeQueued, originalBeforeQueued);
   assert.equal(controlWidget.afterQueued, originalAfterQueued);
 }
+
+{
+  const { node, seedWidget, controlWidget } = makeNode("fixed", { seed: 1010, reroll: 2 });
+  installSpmSeedSerializedSync(node);
+  installSpmSeedControlPersistence(node);
+  controlWidget.value = "randomize";
+  controlWidget.callback("randomize");
+  setGraphNodesForTest([node]);
+  const queued = randomizeSpmSeedsBeforeQueue();
+  assert.equal(queued.length, 1);
+  assert.equal(seedWidget.value, 987654321);
+  restoreQueuedSpmSeeds(queued);
+  assert.equal(node._spmQueuedSeed.seed, 987654321);
+
+  controlWidget.value = "fixed";
+  controlWidget.callback("fixed");
+  assert.equal(node._spmQueuedSeed, undefined);
+  seedWidget.value = 2468;
+  seedWidget.callback(2468);
+  setGraphNodesForTest([node]);
+  const fixedQueued = randomizeSpmSeedsBeforeQueue();
+  assert.equal(fixedQueued.length, 0);
+  assert.equal(seedWidget.value, 2468);
+  assert.deepEqual(node.widgets_values, ["{}", 2468, 2]);
+}
 """
         subprocess.run(["node", "--input-type=module", "-", str(helper_path)], input=script, text=True, check=True)
 
@@ -234,6 +319,8 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
         self.assertIn("async function sha256Hex(text)", source)
         self.assertIn("function liveSpmExecutionState(node, outputNode = null)", source)
         self.assertIn("async function spmCacheTokenForNode(node, outputNode = null)", source)
+        self.assertIn('outputNode?.inputs?.seed ?? widgetByName(node, "seed")?.value ?? 0', source)
+        self.assertIn('outputNode?.inputs?.reroll ?? widgetByName(node, "reroll")?.value ?? 0', source)
         self.assertIn("resolvePrompt(prompt?.text || \"\", state.variables, seed, reroll, state.cycleState).resolved_prompt", source)
         self.assertIn("async function applySpmCacheTokensToPrompt(prompt, graph = defaultGraph())", source)
         self.assertIn("function prepareSpmPrivacyForSerialization(graph = defaultGraph())", source)
@@ -249,6 +336,82 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
         self.assertNotIn("if (spmQueuePromptDepth <= 0)", source)
         self.assertNotIn("widgets_values[index] = token", source)
         self.assertNotIn("workflow.nodes", source)
+
+        script = r"""
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const source = fs.readFileSync(process.argv.at(-1), "utf8");
+const start = source.indexOf("function liveSpmExecutionState");
+const end = source.indexOf("function prepareSpmPrivacyForSerialization", start);
+assert.notEqual(start, -1);
+assert.notEqual(end, -1);
+const helperSource = source.slice(start, end);
+
+const factory = new Function(`
+const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
+const SPM_PRIVACY_FIELD = "spm_data";
+const resolveCalls = [];
+
+function widgetByName(node, name) {
+  return node?.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function normalizeState(value) {
+  return value;
+}
+
+function parseState(value) {
+  return JSON.parse(value);
+}
+
+function isEncryptedStateValue() {
+  return false;
+}
+
+function selectedPrompt(state) {
+  return state.prompts.find((prompt) => prompt.id === state.selectedPromptId) || state.prompts[0] || null;
+}
+
+function resolvePrompt(text, variables, seed, reroll) {
+  resolveCalls.push({ text, seed, reroll, variables });
+  return { resolved_prompt: String(text) + ":" + seed + ":" + reroll };
+}
+
+async function sha256Hex(text) {
+  return String(text);
+}
+
+${helperSource}
+return { spmCacheTokenForNode, resolveCalls };
+`);
+
+const { spmCacheTokenForNode, resolveCalls } = factory();
+const state = {
+  selectedPromptId: "prompt1",
+  prompts: [{ id: "prompt1", text: "A {{mood}} portrait" }],
+  variables: { mood: { mode: "random", values: ["calm", "stormy"] } },
+  cycleState: {},
+};
+const node = {
+  widgets: [
+    { name: "spm_data", value: JSON.stringify(state) },
+    { name: "seed", value: 9999 },
+    { name: "reroll", value: 5 },
+  ],
+};
+
+const token = await spmCacheTokenForNode(node, { inputs: { spm_data: "ignored", seed: 1234, reroll: 7 } });
+assert.equal(resolveCalls.at(-1).seed, 1234);
+assert.equal(resolveCalls.at(-1).reroll, 7);
+assert.equal(token, "spm-cache-v1:A {{mood}} portrait:1234:7");
+
+const fallbackToken = await spmCacheTokenForNode(node, { inputs: { spm_data: "ignored" } });
+assert.equal(resolveCalls.at(-1).seed, 9999);
+assert.equal(resolveCalls.at(-1).reroll, 5);
+assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
+"""
+        subprocess.run(["node", "--input-type=module", "-", str(ROOT / "web/js/smart_prompt_manager.js")], input=script, text=True, check=True)
 
     def test_privacy_serialization_hooks_use_stable_envelope_reuse(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
@@ -412,6 +575,24 @@ assert.equal(parsedPlaintext.state.prompts[1].title, "Wide landscape");
 assert.equal(parsedPlaintext.state.prompts.length, 2);
 assert.equal(isLibraryImportText(JSON.stringify(plaintextPackage)), true);
 assert.equal(isLibraryImportText(JSON.stringify(plaintextState)), true);
+
+const poisonedVariableLibrary = {
+  ...plaintextState,
+  seed: 1125899906842624,
+  reroll: 99,
+  control_after_generate: "randomize",
+  widgets_values: ["{}", 1125899906842624, "randomize", 99],
+  last_serialization: { widgets_values: ["{}", 1125899906842624, "randomize", 99] },
+};
+const parsedPoisoned = parseSpmImport(JSON.stringify(poisonedVariableLibrary));
+assert.equal(parsedPoisoned.encrypted, false);
+assert.equal(parsedPoisoned.state.prompts.length, 2);
+assert.deepEqual(parsedPoisoned.state.variables.mood.values, ["calm"]);
+assert.equal(Object.hasOwn(parsedPoisoned.state, "seed"), false);
+assert.equal(Object.hasOwn(parsedPoisoned.state, "reroll"), false);
+assert.equal(Object.hasOwn(parsedPoisoned.state, "widgets_values"), false);
+assert.equal(Object.hasOwn(parsedPoisoned.state, "last_serialization"), false);
+assert.equal(Object.hasOwn(parsedPoisoned.state, "control_after_generate"), false);
 
 const singlePromptJson = JSON.stringify({
   version: 1,

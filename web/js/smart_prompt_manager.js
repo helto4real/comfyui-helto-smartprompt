@@ -6,7 +6,7 @@ const VALID_NAME_RE = /^[A-Za-z0-9_-]+$/;
 const TOKEN_RE = /\{\{([^{}]*)\}\}/g;
 const MODES = ["random", "fixed", "cycle"];
 const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
-const SEED_MAX = Number.MAX_SAFE_INTEGER;
+const SEED_MAX = 1125899906842624;
 const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
 const SPM_PRIVACY_FIELD = "spm_data";
 const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
@@ -74,7 +74,7 @@ function randomUnit53() {
 }
 
 function randomSeed() {
-  return Math.floor(randomUnit53() * SEED_MAX) + 1;
+  return Math.floor(randomUnit53() * (SEED_MAX - 1)) + 1;
 }
 
 function widgetByName(node, name) {
@@ -803,6 +803,12 @@ function liveSeedControlMode(node) {
   return validSeedControlMode(controlWidget?.value);
 }
 
+function clearQueuedSeedUnlessRandomize(node) {
+  if (liveSeedControlMode(node) !== "randomize" && node?._spmQueuedSeed) {
+    delete node._spmQueuedSeed;
+  }
+}
+
 function writeWidgetValue(node, widget, value) {
   if (!node || !widget) return false;
   const previousValue = widget.value;
@@ -847,6 +853,22 @@ function installSpmSeedControlPersistence(node) {
   controlWidget.serialize = false;
   controlWidget.options ||= {};
   controlWidget.options.serialize = false;
+  if (!controlWidget.__spmSeedControlPersistence) {
+    const originalCallback = controlWidget.callback;
+    controlWidget.callback = function spmSeedControlCallback(...args) {
+      try {
+        return originalCallback?.apply(this, args);
+      } finally {
+        clearQueuedSeedUnlessRandomize(node);
+        syncSpmSeedSerializedValue(node, { dirty: true });
+      }
+    };
+    Object.defineProperty(controlWidget, "__spmSeedControlPersistence", {
+      value: true,
+      configurable: true,
+    });
+  }
+  clearQueuedSeedUnlessRandomize(node);
   return controlWidget;
 }
 
@@ -895,6 +917,7 @@ function installSpmSeedSerializedSync(node) {
     try {
       return originalCallback?.apply(this, args);
     } finally {
+      clearQueuedSeedUnlessRandomize(node);
       syncSpmSeedSerializedValue(node, { dirty: true });
     }
   };
@@ -950,6 +973,7 @@ function randomizeSpmSeedsBeforeQueue() {
     }
     syncSpmSerializedWidgetValues(node);
     if (liveSeedControlMode(node) !== "randomize") {
+      delete node._spmQueuedSeed;
       continue;
     }
     const seedWidget = widgetByName(node, "seed");
@@ -1046,8 +1070,8 @@ async function spmCacheTokenForNode(node, outputNode = null) {
   const state = liveSpmExecutionState(node, outputNode);
   let tokenSource = "";
   if (state) {
-    const seed = Number.parseInt(widgetByName(node, "seed")?.value ?? outputNode?.inputs?.seed ?? 0, 10) || 0;
-    const reroll = Number.parseInt(widgetByName(node, "reroll")?.value ?? outputNode?.inputs?.reroll ?? 0, 10) || 0;
+    const seed = Number.parseInt(outputNode?.inputs?.seed ?? widgetByName(node, "seed")?.value ?? 0, 10) || 0;
+    const reroll = Number.parseInt(outputNode?.inputs?.reroll ?? widgetByName(node, "reroll")?.value ?? 0, 10) || 0;
     const prompt = selectedPrompt(state);
     tokenSource = resolvePrompt(prompt?.text || "", state.variables, seed, reroll, state.cycleState).resolved_prompt;
   } else {
