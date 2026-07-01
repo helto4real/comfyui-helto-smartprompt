@@ -597,6 +597,7 @@ function setWidgetRawValue(node, widget, value) {
   markNodeDirty(node);
 }
 
+// ---- Seed queue helpers ----
 function markNodeDirty(node) {
   if (typeof node?.setDirtyCanvas === "function") {
     node.setDirtyCanvas(true, true);
@@ -611,7 +612,10 @@ function validSeedControlMode(value) {
   return SEED_CONTROL_MODES.includes(value) ? value : null;
 }
 
-function isSeedControlWidget(widget, seedWidget = null) {
+function isSeedControlWidgetCandidate(widget, seedWidget = null) {
+  if (!widget || widget === seedWidget) {
+    return false;
+  }
   const values = widget?.options?.values;
   const seedName = String(seedWidget?.name || "seed");
   return (
@@ -622,23 +626,24 @@ function isSeedControlWidget(widget, seedWidget = null) {
   );
 }
 
+function isSeedControlWidget(widget, seedWidget = null) {
+  return isSeedControlWidgetCandidate(widget, seedWidget) && Boolean(validSeedControlMode(widget.value));
+}
+
 function seedControlWidget(node, seedWidget = widgetByName(node, "seed")) {
-  for (const widget of seedWidget?.linkedWidgets || []) {
-    if (isSeedControlWidget(widget, seedWidget)) {
+  const linkedWidgets = Array.isArray(seedWidget?.linkedWidgets) ? seedWidget.linkedWidgets : [];
+  for (const widget of linkedWidgets) {
+    if (isSeedControlWidgetCandidate(widget, seedWidget)) {
       return widget;
     }
   }
-  return node?.widgets?.find((widget) => widget !== seedWidget && isSeedControlWidget(widget, seedWidget)) || null;
+  return node?.widgets?.find((widget) => widget !== seedWidget && isSeedControlWidgetCandidate(widget, seedWidget)) || null;
 }
 
 function liveSeedControlMode(node) {
   const seedWidget = widgetByName(node, "seed");
   const controlWidget = seedControlWidget(node, seedWidget);
-  return (
-    validSeedControlMode(controlWidget?.value) ??
-    validSeedControlMode(seedWidget?.control_after_generate) ??
-    validSeedControlMode(seedWidget?.options?.control_after_generate)
-  );
+  return validSeedControlMode(controlWidget?.value);
 }
 
 function writeWidgetValue(node, widget, value) {
@@ -653,7 +658,7 @@ function writeWidgetValue(node, widget, value) {
 }
 
 function widgetSerializesToWorkflow(widget) {
-  return Boolean(widget) && widget.serialize !== false && widget.options?.serialize !== false;
+  return Boolean(widget) && widget.serialize !== false;
 }
 
 function serializedWidgetIndex(node, targetWidget) {
@@ -676,6 +681,71 @@ function writeSerializedWidgetValue(node, widget, value) {
       values[index] = value;
     }
   }
+}
+
+function installSpmSeedControlPersistence(node) {
+  const seedWidget = widgetByName(node, "seed");
+  const controlWidget = seedControlWidget(node, seedWidget);
+  if (!controlWidget) return null;
+  controlWidget.serialize = false;
+  controlWidget.options ||= {};
+  controlWidget.options.serialize = false;
+  return controlWidget;
+}
+
+function normalizeSpmWidgetsValuesForConfigure(info) {
+  const values = info?.widgets_values;
+  if (!Array.isArray(values) || values.length < 4) return;
+  if (validSeedControlMode(values[2]) || values[2] == null) {
+    values.splice(2, 1);
+  }
+}
+
+function spmSerializedWidgetValues(node, spmDataValue = widgetByName(node, SPM_PRIVACY_FIELD)?.value) {
+  return [
+    spmDataValue,
+    widgetByName(node, "seed")?.value ?? 0,
+    widgetByName(node, "reroll")?.value ?? 0,
+  ];
+}
+
+function writeSpmSerializedWidgetValues(target, values) {
+  if (!Array.isArray(target?.widgets_values)) return;
+  target.widgets_values.splice(0, target.widgets_values.length, ...values);
+}
+
+function syncSpmSerializedWidgetValues(node, { spmDataValue = undefined, dirty = false } = {}) {
+  if (!node) return false;
+  installSpmSeedControlPersistence(node);
+  const values = spmSerializedWidgetValues(node, spmDataValue);
+  writeSpmSerializedWidgetValues(node, values);
+  writeSpmSerializedWidgetValues(node.last_serialization, values);
+  if (dirty) markNodeDirty(node);
+  return true;
+}
+
+function syncSpmSeedSerializedValue(node, { dirty = false } = {}) {
+  const seedWidget = widgetByName(node, "seed");
+  if (!seedWidget) return false;
+  return syncSpmSerializedWidgetValues(node, { dirty });
+}
+
+function installSpmSeedSerializedSync(node) {
+  const seedWidget = widgetByName(node, "seed");
+  if (!seedWidget || seedWidget.__spmSeedSerializedSync) return;
+  const originalCallback = seedWidget.callback;
+  seedWidget.callback = function spmSeedCallback(...args) {
+    try {
+      return originalCallback?.apply(this, args);
+    } finally {
+      syncSpmSeedSerializedValue(node, { dirty: true });
+    }
+  };
+  Object.defineProperty(seedWidget, "__spmSeedSerializedSync", {
+    value: true,
+    configurable: true,
+  });
+  syncSpmSeedSerializedValue(node);
 }
 
 function writeSpmSeedValue(node, seed) {
@@ -718,7 +788,11 @@ function restoreSeedControlCallbacks(suspended) {
 function randomizeSpmSeedsBeforeQueue() {
   const queuedSeeds = [];
   for (const node of graphNodes()) {
-    if (!isSmartPromptManagerNode(node) || liveSeedControlMode(node) !== "randomize") {
+    if (!isSmartPromptManagerNode(node)) {
+      continue;
+    }
+    syncSpmSerializedWidgetValues(node);
+    if (liveSeedControlMode(node) !== "randomize") {
       continue;
     }
     const seedWidget = widgetByName(node, "seed");
@@ -749,6 +823,7 @@ function restoreQueuedSpmSeeds(queuedSeeds) {
     }
   }
 }
+// ---- End seed queue helpers ----
 
 function installSpmSeedQueuePatch(source = "install") {
   if (typeof app.queuePrompt !== "function") {
@@ -1107,6 +1182,7 @@ function enhanceNode(node) {
 
   const seedWidget = node.widgets?.find((widget) => widget.name === "seed");
   const rerollWidget = node.widgets?.find((widget) => widget.name === "reroll");
+  installSpmSeedSerializedSync(node);
   const getSeed = () => Number.parseInt(seedWidget?.value || 0, 10) || 0;
   const getReroll = () => Number.parseInt(rerollWidget?.value || 0, 10) || 0;
 
@@ -1340,10 +1416,7 @@ function enhanceNode(node) {
   }
 
   function writeSerializedSpmData(info, value) {
-    const index = serializedWidgetIndex(node, dataWidget);
-    if (Array.isArray(info?.widgets_values) && index >= 0) {
-      info.widgets_values[index] = value;
-    }
+    info.widgets_values = spmSerializedWidgetValues(node, value);
   }
 
   function preparePrivacySerialization() {
@@ -2639,9 +2712,20 @@ app.registerExtension({
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_CLASS) return;
+    const originalConfigure = nodeType.prototype.configure;
+    nodeType.prototype.configure = function configure(data) {
+      normalizeSpmWidgetsValuesForConfigure(data);
+      installSpmSeedControlPersistence(this);
+      const result = originalConfigure?.apply(this, arguments);
+      installSpmSeedControlPersistence(this);
+      syncSpmSerializedWidgetValues(this);
+      return result;
+    };
+
     const original = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function onNodeCreated() {
       original?.apply(this, arguments);
+      installSpmSeedControlPersistence(this);
       requestAnimationFrame(() => enhanceNode(this));
     };
   },

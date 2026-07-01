@@ -11,6 +11,7 @@ class SmartPromptManagerFrontendTests(unittest.TestCase):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
         self.assertIn("const SEED_MAX = Number.MAX_SAFE_INTEGER;", source)
+        self.assertIn("// ---- Seed queue helpers ----", source)
         self.assertIn("function randomizeSpmSeedsBeforeQueue()", source)
         self.assertIn('liveSeedControlMode(node) !== "randomize"', source)
         self.assertIn("writeSpmSeedValue(node, seed)", source)
@@ -20,6 +21,198 @@ class SmartPromptManagerFrontendTests(unittest.TestCase):
         self.assertIn('scheduleSpmSeedQueuePatch("setup")', source)
         self.assertIn("spmQueuePromptDepth += 1;", source)
         self.assertIn("spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);", source)
+
+    def test_seed_queue_helpers_only_randomize_explicit_randomize_mode(self):
+        helper_path = ROOT / "web/js/smart_prompt_manager.js"
+        script = r"""
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+const source = fs.readFileSync(process.argv.at(-1), "utf8");
+const start = source.indexOf("// ---- Seed queue helpers ----");
+const end = source.indexOf("// ---- End seed queue helpers ----");
+assert.notEqual(start, -1);
+assert.notEqual(end, -1);
+const helperSource = source.slice(start, end);
+
+const factory = new Function(`
+const app = {
+  canvas: { setDirty() {} },
+  graph: { setDirtyCanvas() {} },
+};
+const NODE_CLASS = "SmartPromptManager";
+const SPM_PRIVACY_FIELD = "spm_data";
+const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
+let graphNodesForTest = [];
+
+function graphNodes() {
+  return graphNodesForTest;
+}
+
+function isSmartPromptManagerNode(node) {
+  return node?.type === NODE_CLASS;
+}
+
+function widgetByName(node, name) {
+  return node?.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function randomSeed() {
+  return 987654321;
+}
+
+${helperSource}
+const SEED_CONTROL_MODES_FOR_TESTS = SEED_CONTROL_MODES;
+return {
+  SEED_CONTROL_MODES_FOR_TESTS,
+  installSpmSeedSerializedSync,
+  installSpmSeedControlPersistence,
+  liveSeedControlMode,
+  normalizeSpmWidgetsValuesForConfigure,
+  randomizeSpmSeedsBeforeQueue,
+  restoreQueuedSpmSeeds,
+  spmSerializedWidgetValues,
+  syncSpmSeedSerializedValue,
+  syncSpmSerializedWidgetValues,
+  setGraphNodesForTest(nodes) { graphNodesForTest = nodes; },
+};`);
+
+const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
+const NODE_CLASS = "SmartPromptManager";
+
+const {
+  SEED_CONTROL_MODES_FOR_TESTS,
+  installSpmSeedSerializedSync,
+  installSpmSeedControlPersistence,
+  liveSeedControlMode,
+  normalizeSpmWidgetsValuesForConfigure,
+  randomizeSpmSeedsBeforeQueue,
+  restoreQueuedSpmSeeds,
+  spmSerializedWidgetValues,
+  syncSpmSeedSerializedValue,
+  syncSpmSerializedWidgetValues,
+  setGraphNodesForTest,
+} = factory();
+
+assert.deepEqual(SEED_CONTROL_MODES_FOR_TESTS, SEED_CONTROL_MODES);
+
+function makeNode(mode, options = {}) {
+  const seed = options.seed ?? 1234;
+  const serializedSeed = options.serializedSeed ?? seed;
+  const dataWidget = { name: "spm_data", value: "{}", options: {} };
+  const seedWidget = {
+    name: "seed",
+    value: seed,
+    options: {},
+    callbackCalls: 0,
+    callback(value) {
+      this.callbackCalls += 1;
+      this.lastCallbackValue = value;
+    },
+  };
+  const rerollWidget = { name: "reroll", value: 0, options: {} };
+  const controlWidget = {
+    name: options.controlName ?? "control_after_generate",
+    value: mode,
+    options: {
+      values: options.controlValues ?? SEED_CONTROL_MODES,
+      serialize: false,
+    },
+    beforeQueued() {},
+    afterQueued() {},
+  };
+  seedWidget.linkedWidgets = options.linkedWidgets ?? [controlWidget];
+  const node = {
+    type: NODE_CLASS,
+    widgets: [dataWidget, seedWidget, rerollWidget, controlWidget],
+    widgets_values: ["{}", serializedSeed, 0],
+    last_serialization: { widgets_values: ["{}", serializedSeed, 0] },
+    graph: {
+      incrementVersion() {},
+      setDirtyCanvas() {},
+    },
+  };
+  return { node, seedWidget, controlWidget, seed };
+}
+
+{
+  const info = { widgets_values: ["{}", 2222, "fixed", 7] };
+  normalizeSpmWidgetsValuesForConfigure(info);
+  assert.deepEqual(info.widgets_values, ["{}", 2222, 7]);
+}
+
+{
+  const info = { widgets_values: ["{}", 2222, null, 7] };
+  normalizeSpmWidgetsValuesForConfigure(info);
+  assert.deepEqual(info.widgets_values, ["{}", 2222, 7]);
+}
+
+for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
+  const { node, seedWidget, controlWidget, seed } = makeNode(mode, { seed: 2222, serializedSeed: 1111 });
+  setGraphNodesForTest([node]);
+  const queued = randomizeSpmSeedsBeforeQueue();
+  assert.equal(queued.length, 0, `${mode} must not queue an SPM random seed`);
+  assert.equal(seedWidget.value, seed, `${mode} must leave the live seed unchanged`);
+  assert.equal(node.widgets_values[1], seed, `${mode} must sync serialized seed to live seed`);
+  assert.equal(node.last_serialization.widgets_values[1], seed, `${mode} must sync last serialized seed to live seed`);
+  assert.equal(controlWidget.serialize, false, `${mode} control must be workflow-runtime only`);
+  assert.deepEqual(node.widgets_values, ["{}", seed, 0], `${mode} must use compact SPM widget serialization`);
+}
+
+{
+  const { node, seedWidget, controlWidget, seed } = makeNode("fixed", { controlName: "fixed", seed: 3333, serializedSeed: 1111 });
+  setGraphNodesForTest([node]);
+  assert.equal(liveSeedControlMode(node), "fixed");
+  assert.equal(randomizeSpmSeedsBeforeQueue().length, 0);
+  assert.equal(seedWidget.value, seed);
+  assert.equal(node.widgets_values[1], seed);
+  assert.equal(node.last_serialization.widgets_values[1], seed);
+  assert.equal(controlWidget.serialize, false);
+}
+
+{
+  const { node, seedWidget } = makeNode("fixed", { seed: 4444, serializedSeed: 1111 });
+  assert.equal(syncSpmSeedSerializedValue(node), true);
+  assert.equal(node.widgets_values[1], 4444);
+  assert.equal(node.last_serialization.widgets_values[1], 4444);
+  installSpmSeedSerializedSync(node);
+  seedWidget.value = 5555;
+  seedWidget.callback(5555);
+  assert.equal(seedWidget.callbackCalls, 1);
+  assert.equal(node.widgets_values[1], 5555);
+  assert.equal(node.last_serialization.widgets_values[1], 5555);
+}
+
+{
+  const { node, controlWidget } = makeNode("fixed");
+  assert.equal(controlWidget.serialize, undefined);
+  assert.equal(installSpmSeedControlPersistence(node), controlWidget);
+  assert.equal(controlWidget.serialize, false);
+  assert.deepEqual(spmSerializedWidgetValues(node, "state"), ["state", 1234, 0]);
+  assert.equal(syncSpmSerializedWidgetValues(node), true);
+  assert.deepEqual(node.widgets_values, ["{}", 1234, 0]);
+}
+
+{
+  const { node, seedWidget, controlWidget } = makeNode("randomize");
+  const originalBeforeQueued = controlWidget.beforeQueued;
+  const originalAfterQueued = controlWidget.afterQueued;
+  setGraphNodesForTest([node]);
+  const queued = randomizeSpmSeedsBeforeQueue();
+  assert.equal(queued.length, 1);
+  assert.equal(seedWidget.value, 987654321);
+  assert.equal(seedWidget.callbackCalls, 1);
+  assert.equal(node.widgets_values[1], 987654321);
+  assert.equal(node.last_serialization.widgets_values[1], 987654321);
+  assert.equal(node._spmQueuedSeed.seed, 987654321);
+  assert.notEqual(controlWidget.beforeQueued, originalBeforeQueued);
+  assert.notEqual(controlWidget.afterQueued, originalAfterQueued);
+  restoreQueuedSpmSeeds(queued);
+  assert.equal(controlWidget.beforeQueued, originalBeforeQueued);
+  assert.equal(controlWidget.afterQueued, originalAfterQueued);
+}
+"""
+        subprocess.run(["node", "--input-type=module", "-", str(helper_path)], input=script, text=True, check=True)
 
     def test_variable_editor_commits_live_rows_before_actions(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
