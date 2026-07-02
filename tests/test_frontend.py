@@ -365,7 +365,7 @@ function parseState(value) {
   return JSON.parse(value);
 }
 
-function isEncryptedStateValue() {
+function isAnyEncryptedStateValue() {
   return false;
 }
 
@@ -425,6 +425,18 @@ assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
         self.assertIn("forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD)", source)
         self.assertIn("if (!state.privacyMode) {\n      return dataWidget.value;\n    }", source)
         self.assertIn("if (!state.privacyMode) {\n      return Promise.resolve(dataWidget.value);\n    }", source)
+        self.assertIn('const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";', source)
+        self.assertIn('const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";', source)
+        self.assertIn('const HELTO_PRIVACY_MODULE_ROUTE = "/helto_privacy/ui/privacy.js";', source)
+        self.assertIn('const HELTO_PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";', source)
+        self.assertIn("spmSharedPrivacyModulePromise = import(HELTO_PRIVACY_MODULE_ROUTE).catch(() => null);", source)
+        self.assertIn('privacy.showPrivacyKeystoreDialog("auto")', source)
+        self.assertIn("const token = privacy?.getStoredPrivacyToken?.();", source)
+        self.assertIn("if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;", source)
+        self.assertIn("retryOnUnlock && await unlockSharedPrivacyForError(error)", source)
+        self.assertIn("initialUnsupportedEncryptedValue", source)
+        self.assertIn("unsupportedPrivacyEnvelopeString(dataWidget.value)", source)
+        self.assertIn("old privacy schema", source)
 
     def test_import_export_helpers_package_privacy_and_merge_behaviour(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"
@@ -439,7 +451,7 @@ assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
         self.assertIn("setWidgetRawValue(node, dataWidget, imported.spmData)", import_library)
         self.assertIn("syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true })", import_library)
         self.assertIn('status = importStatus("Imported encrypted library", result.warnings);', import_library)
-        self.assertIn("Imported encrypted library, but could not decrypt it with the local privacy key", import_library)
+        self.assertIn("Imported encrypted library, but could not decrypt it with the shared privacy keystore", import_library)
         self.assertIn('status = `Error: ${error.message}`;', source)
         self.assertIn('const input = document.createElement("input");', source)
         self.assertIn('input.type = "file";', source)
@@ -482,6 +494,8 @@ const VIRTUAL_FOLDERS = [
 ];
 const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
 const SPM_EXPORT_VERSION = 1;
+const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
+const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
 let uuidCounter = 0;
 const crypto = {
   randomUUID() {
@@ -541,10 +555,13 @@ function state(prompts, variables = { mood: variable(["calm"]) }) {
   };
 }
 
-function envelope(id) {
+const SPM_PRIVACY_SCHEMA_FOR_TEST = "helto.smart-prompt-manager";
+const SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST = "comfyui-helto-prompts.smart-prompt-manager";
+
+function envelope(id, schema = SPM_PRIVACY_SCHEMA_FOR_TEST) {
   return JSON.stringify({
     version: 1,
-    schema: "comfyui-helto-prompts.smart-prompt-manager",
+    schema,
     encrypted: true,
     algorithm: "AES-256-GCM",
     keyId: "test-key",
@@ -616,6 +633,14 @@ const parsedEncrypted = parseSpmImport(JSON.stringify(privatePackage));
 assert.equal(parsedEncrypted.encrypted, true);
 assert.equal(parsedEncrypted.spmData, encryptedEnvelope);
 assert.equal(parsedEncrypted.state, null);
+assert.throws(
+  () => parseSpmImport(envelope("legacy", SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST)),
+  /unsupported legacy privacy schema/,
+);
+assert.throws(
+  () => parseSpmImport(JSON.stringify({ ...privatePackage, spm_data: envelope("legacy-export", SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST) })),
+  /unsupported legacy privacy schema/,
+);
 
 const current = state([
   prompt("prompt_current", "Same"),
@@ -667,7 +692,10 @@ function parseJsonObject(value) {
   }
 }
 
-const factory = new Function("parseJsonObject", `${helperSource}
+const factory = new Function("parseJsonObject", `
+const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
+const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
+${helperSource}
 return {
   rememberPrivacyEnvelope,
   rememberedPrivacyEnvelope,
@@ -683,10 +711,13 @@ const {
   forgetPrivacyEnvelope,
 } = factory(parseJsonObject);
 
-function envelope(id) {
+const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
+const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
+
+function envelope(id, schema = SPM_PRIVACY_SCHEMA) {
   return JSON.stringify({
     version: 1,
-    schema: "comfyui-helto-prompts.smart-prompt-manager",
+    schema,
     encrypted: true,
     algorithm: "AES-256-GCM",
     keyId: "test-key",
@@ -749,6 +780,7 @@ const passthrough = await encryptedOrReusePrivacyValue({}, "spm_data", currentEn
 assert.equal(passthrough, currentEnvelope);
 assert.equal(calls, 0);
 assert.equal(encryptedPrivacyEnvelopeString(JSON.parse(currentEnvelope)), currentEnvelope);
+assert.equal(encryptedPrivacyEnvelopeString(JSON.parse(envelope("legacy", SPM_LEGACY_PRIVACY_SCHEMA))), "");
 
 forgetPrivacyEnvelope(owner, "spm_data");
 const afterForget = await encryptedOrReusePrivacyValue(owner, "spm_data", { a: 1, b: 3 }, async () => {

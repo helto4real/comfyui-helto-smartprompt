@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from nodes import SmartPromptManager
-from privacy import ALGORITHM, ENVELOPE_SCHEMA
+from privacy import ALGORITHM, ENVELOPE_SCHEMA, LEGACY_ENVELOPE_SCHEMA
 from schema import default_state, state_to_json
 
 
@@ -93,6 +93,30 @@ class SmartPromptManagerNodeTests(unittest.TestCase):
             )
         decrypt_state.assert_called_once_with(envelope)
         self.assertEqual(result[0], "A dreamy portrait")
+
+    def test_legacy_encrypted_workflow_spm_data_warns_without_decrypting(self):
+        envelope = {
+            "version": 1,
+            "schema": LEGACY_ENVELOPE_SCHEMA,
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "legacy-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+        token = "spm-cache-v1:" + "d" * 64
+
+        result = SmartPromptManager().resolve(
+            token,
+            seed=1,
+            reroll=0,
+            unique_id="7",
+            extra_pnginfo=self._extra_pnginfo("7", envelope),
+        )
+
+        warnings = json.loads(result[5])["warnings"]
+        self.assertEqual(result[0], "")
+        self.assertTrue(any("unsupported legacy privacy schema" in warning for warning in warnings))
 
     def test_cache_token_without_workflow_metadata_warns_readably(self):
         token = "spm-cache-v1:" + "c" * 64

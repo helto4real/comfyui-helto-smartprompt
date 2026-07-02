@@ -155,13 +155,13 @@ Hidden previews only affect what is visible on screen. **Privacy mode** protects
 
 When Privacy mode is enabled:
 
-- the node creates `config/privacy_key.json` on first use
-- `config/` is ignored by git
-- prompt library data is stored in the workflow as an AES-256-GCM encrypted envelope
-- workflow reload decrypts the library through the local ComfyUI backend
-- the key is never written into the workflow, exports, copy/paste JSON, or README examples
+- prompt library data is stored in the workflow as an AES-256-GCM encrypted envelope with schema `helto.smart-prompt-manager`
+- encryption uses the shared `helto-privacy` keystore at `~/.config/helto/privacy_keystore.json`
+- one shared unlock covers Helto node packs in the same ComfyUI origin
+- workflow reload decrypts the library through the local ComfyUI backend after the shared privacy dialog unlocks or creates the keystore
+- the key and session token are never written into the workflow, exports, copy/paste JSON, or README examples
 
-Back up `config/privacy_key.json` privately. If that file is lost, encrypted workflows cannot be decrypted. If an encrypted workflow is opened without the matching key, the node shows a locked error state and avoids overwriting the encrypted data.
+Back up the shared Helto privacy keystore privately. If it is lost or the password is unavailable, encrypted workflows cannot be decrypted. Encrypted workflows written by older Smart Prompt Manager privacy schemas are not migrated by this version; they show a locked/incompatible state and can be reset from the node UI. Plaintext workflows still load normally.
 
 Privacy mode protects against accidentally sharing clear-text prompts in workflow files. It does not protect against someone with access to the local ComfyUI machine, browser session, Python process, or node outputs during execution.
 
@@ -272,7 +272,7 @@ When Privacy mode is enabled, the saved workflow contains an encrypted envelope 
 - Prompt history is not included in v1.
 - The editor is not a full rich text editor; this is intentional for ComfyUI compatibility.
 - Autocomplete cursor positioning uses a practical popup placement instead of exact textarea caret geometry.
-- Privacy mode requires the Python `cryptography` package and the local `config/privacy_key.json` file.
+- Privacy mode requires `helto-privacy` and the Python `cryptography` package.
 - The JavaScript UI mirrors backend resolution logic, but the Python backend remains the source of truth for actual node outputs.
 
 ## Development

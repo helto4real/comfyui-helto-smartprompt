@@ -1,64 +1,141 @@
 import json
+import os
 import tempfile
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
-from privacy import CRYPTO_AVAILABLE, PrivacyError, crypto_status, decrypt_state, encrypt_state, is_encrypted_payload, key_path
+import helto_privacy.keystore as hp_keystore
+from helto_privacy.guard import PRIVACY_TOKEN_HEADER, check_privacy_token
+
+from privacy import (
+    ALGORITHM,
+    CRYPTO_AVAILABLE,
+    ENVELOPE_SCHEMA,
+    LEGACY_ENVELOPE_SCHEMA,
+    PrivacyError,
+    crypto_status,
+    decrypt_state,
+    encrypt_state,
+    is_encrypted_payload,
+    is_unsupported_encrypted_payload,
+)
 from schema import default_state
 
 
+PASSWORD = "privacy-password"
+
+
 class PrivacyTests(unittest.TestCase):
-    @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
-    def test_key_generation_creates_stable_metadata(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            state = default_state()
-            envelope = encrypt_state(state, tmp)
-            path = key_path(tmp)
-            self.assertTrue(path.exists())
-            key_data = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(key_data["algorithm"], "AES-256-GCM")
-            self.assertEqual(envelope["keyId"], key_data["keyId"])
-            self.assertTrue(crypto_status(tmp)["keyExists"])
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = self._tmp.name
+        self._env = patch.dict(
+            os.environ,
+            {
+                hp_keystore.KEYSTORE_ENV: os.path.join(root, "privacy_keystore.json"),
+                hp_keystore.SESSION_DIR_ENV: os.path.join(root, "session"),
+            },
+        )
+        self._scrypt = patch.object(hp_keystore, "SCRYPT_N", 2**12)
+        self._env.start()
+        self._scrypt.start()
+        self.addCleanup(self._scrypt.stop)
+        self.addCleanup(self._env.stop)
+        self.addCleanup(self._tmp.cleanup)
 
     @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
-    def test_encrypt_decrypt_round_trip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            state = default_state()
-            state["privacyMode"] = True
-            envelope = encrypt_state(state, tmp)
-            decrypted, warnings = decrypt_state(envelope, tmp)
-            self.assertFalse(warnings)
-            self.assertTrue(decrypted["privacyMode"])
-            self.assertEqual(decrypted["prompts"][0]["title"], state["prompts"][0]["title"])
+    def test_status_uses_shared_keystore_without_local_key_file(self):
+        status = crypto_status()
+        self.assertEqual(ENVELOPE_SCHEMA, "helto.smart-prompt-manager")
+        self.assertTrue(status["available"])
+        self.assertEqual(status["algorithm"], ALGORITHM)
+        self.assertFalse(status["keyExists"])
+        self.assertEqual(status["keyPath"], "")
+        self.assertFalse(status["keystoreInitialized"])
 
     @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
-    def test_envelope_does_not_contain_prompt_plaintext(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            state = default_state()
-            envelope = encrypt_state(state, tmp)
-            text = json.dumps(envelope)
-            self.assertTrue(is_encrypted_payload(envelope))
-            self.assertNotIn("Cinematic portrait", text)
-            self.assertNotIn("cyberpunk detective", text)
-            self.assertNotIn("{{mood}}", text)
+    def test_encrypt_requires_initialized_keystore(self):
+        with self.assertRaises(PrivacyError) as ctx:
+            encrypt_state(default_state())
+        self.assertIn("PRIVACY_KEYSTORE_UNINITIALIZED", str(ctx.exception))
 
     @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
-    def test_wrong_key_fails_readably(self):
-        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
-            envelope = encrypt_state(default_state(), one)
-            encrypt_state(default_state(), two)
-            with self.assertRaises(PrivacyError) as ctx:
-                decrypt_state(envelope, two)
-            self.assertIn("different local privacy key", str(ctx.exception))
+    def test_encrypt_decrypt_round_trip_through_shared_keystore(self):
+        hp_keystore.initialize_keystore(PASSWORD)
+        state = default_state()
+        state["privacyMode"] = True
+
+        envelope = encrypt_state(state)
+        text = json.dumps(envelope)
+        self.assertTrue(is_encrypted_payload(envelope))
+        self.assertEqual(envelope["schema"], ENVELOPE_SCHEMA)
+        self.assertNotIn("Cinematic portrait", text)
+        self.assertNotIn("cyberpunk detective", text)
+        self.assertNotIn("{{mood}}", text)
+
+        decrypted, warnings = decrypt_state(envelope)
+        self.assertFalse(warnings)
+        self.assertTrue(decrypted["privacyMode"])
+        self.assertEqual(decrypted["prompts"][0]["title"], state["prompts"][0]["title"])
 
     @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
-    def test_missing_key_fails_readably(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            envelope = encrypt_state(default_state(), tmp)
-            Path(key_path(tmp)).unlink()
-            with self.assertRaises(PrivacyError) as ctx:
-                decrypt_state(envelope, tmp)
-            self.assertIn("missing", str(ctx.exception).lower())
+    def test_locked_keystore_fails_readably(self):
+        hp_keystore.initialize_keystore(PASSWORD)
+        envelope = encrypt_state(default_state())
+        hp_keystore.lock_keystore()
+
+        with self.assertRaises(PrivacyError) as decrypt_ctx:
+            decrypt_state(envelope)
+        self.assertIn("PRIVACY_LOCKED", str(decrypt_ctx.exception))
+
+        with self.assertRaises(PrivacyError) as encrypt_ctx:
+            encrypt_state(default_state())
+        self.assertIn("PRIVACY_LOCKED", str(encrypt_ctx.exception))
+
+    @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
+    def test_privacy_token_guard_accepts_only_unlocked_session_token(self):
+        class Request:
+            def __init__(self, headers=None, cookies=None):
+                self.headers = headers or {}
+                self.cookies = cookies or {}
+
+        self.assertIsNone(check_privacy_token(Request()))
+
+        result = hp_keystore.initialize_keystore(PASSWORD)
+        token = result["token"]
+
+        denied = check_privacy_token(Request())
+        self.assertEqual(denied["status"], 401)
+        self.assertIn("PRIVACY_TOKEN_REQUIRED", denied["error"])
+
+        denied = check_privacy_token(Request(headers={PRIVACY_TOKEN_HEADER: "wrong"}))
+        self.assertEqual(denied["status"], 401)
+        self.assertIn("PRIVACY_TOKEN_REQUIRED", denied["error"])
+
+        self.assertIsNone(check_privacy_token(Request(headers={PRIVACY_TOKEN_HEADER: token})))
+
+        hp_keystore.lock_keystore()
+        denied = check_privacy_token(Request(headers={PRIVACY_TOKEN_HEADER: token}))
+        self.assertEqual(denied["status"], 401)
+        self.assertIn("PRIVACY_LOCKED", denied["error"])
+
+    @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
+    def test_old_encrypted_schema_is_rejected(self):
+        payload = {
+            "version": 1,
+            "schema": LEGACY_ENVELOPE_SCHEMA,
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "legacy-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+
+        self.assertFalse(is_encrypted_payload(payload))
+        self.assertTrue(is_unsupported_encrypted_payload(payload))
+        with self.assertRaises(PrivacyError) as ctx:
+            decrypt_state(payload)
+        self.assertIn("unsupported legacy privacy schema", str(ctx.exception))
 
 
 if __name__ == "__main__":

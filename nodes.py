@@ -10,12 +10,26 @@ from typing import Any
 try:
     from .resolver import needed_variable_definitions, resolve_prompt
     from .schema import default_state, parse_state, selected_prompt, state_to_json
-    from .privacy import PrivacyError, crypto_status, decrypt_state, encrypt_state, is_encrypted_payload
+    from .privacy import (
+        PrivacyError,
+        crypto_status,
+        decrypt_state,
+        encrypt_state,
+        is_encrypted_payload,
+        is_unsupported_encrypted_payload,
+    )
     from .validation import validate_state
 except ImportError:  # Allows running tests from the repository root.
     from resolver import needed_variable_definitions, resolve_prompt
     from schema import default_state, parse_state, selected_prompt, state_to_json
-    from privacy import PrivacyError, crypto_status, decrypt_state, encrypt_state, is_encrypted_payload
+    from privacy import (
+        PrivacyError,
+        crypto_status,
+        decrypt_state,
+        encrypt_state,
+        is_encrypted_payload,
+        is_unsupported_encrypted_payload,
+    )
     from validation import validate_state
 
 
@@ -54,8 +68,8 @@ def _as_mapping(value: Any) -> Mapping[str, Any] | None:
 
 
 def _looks_like_spm_payload(value: Any) -> bool:
-    if is_cache_token(value) or is_encrypted_payload(value):
-        return is_encrypted_payload(value)
+    if is_cache_token(value) or is_encrypted_payload(value) or is_unsupported_encrypted_payload(value):
+        return is_encrypted_payload(value) or is_unsupported_encrypted_payload(value)
     payload = _as_mapping(value)
     if payload is None:
         return False
@@ -135,11 +149,16 @@ def parse_spm_data(value: Any, unique_id: Any = None, extra_pnginfo: Any = None)
             state = _empty_state()
             state["privacyMode"] = True
             return state, [str(exc)]
+    if is_unsupported_encrypted_payload(value):
+        state = _empty_state()
+        state["privacyMode"] = True
+        return state, ["Encrypted Smart Prompt Manager data uses an unsupported legacy privacy schema."]
     return parse_state(value)
 
 
 try:
     from aiohttp import web
+    from helto_privacy import aiohttp_check_privacy_token
     from server import PromptServer
 
     routes = PromptServer.instance.routes
@@ -150,6 +169,9 @@ try:
 
     @routes.post("/helto_spm/privacy/encrypt")
     async def helto_spm_privacy_encrypt(request):
+        denied = aiohttp_check_privacy_token(request)
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
             envelope = encrypt_state(payload.get("state", {}))
@@ -159,6 +181,9 @@ try:
 
     @routes.post("/helto_spm/privacy/decrypt")
     async def helto_spm_privacy_decrypt(request):
+        denied = aiohttp_check_privacy_token(request)
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
             state, warnings = decrypt_state(payload.get("payload", {}))

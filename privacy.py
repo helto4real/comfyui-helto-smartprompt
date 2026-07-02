@@ -1,180 +1,86 @@
-"""Local workflow encryption helpers for Smart Prompt Manager."""
+"""Shared privacy-envelope helpers for Smart Prompt Manager."""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import os
-import secrets
-from pathlib import Path
 from typing import Any, Dict, Mapping, Tuple
 
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    CRYPTO_AVAILABLE = True
-    CRYPTO_IMPORT_ERROR = ""
-except Exception as exc:  # noqa: BLE001 - dependency may be absent in ComfyUI installs.
-    AESGCM = None  # type: ignore[assignment]
-    CRYPTO_AVAILABLE = False
-    CRYPTO_IMPORT_ERROR = str(exc)
+import helto_privacy.envelope as _envelope
+import helto_privacy.keystore as _keystore
+from helto_privacy import PrivacyEnvelopeCodec, PrivacyError  # noqa: F401
 
 try:
-    from .schema import normalize_state, state_to_json
+    from .schema import normalize_state
 except ImportError:  # Allows running tests from the repository root.
-    from schema import normalize_state, state_to_json
+    from schema import normalize_state
 
 
-ENVELOPE_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager"
-ENVELOPE_VERSION = 1
-ALGORITHM = "AES-256-GCM"
-KEY_FILE_NAME = "privacy_key.json"
+ENVELOPE_SCHEMA = "helto.smart-prompt-manager"
+LEGACY_ENVELOPE_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager"
+ENVELOPE_VERSION = _envelope.ENVELOPE_VERSION
+ALGORITHM = _envelope.ALGORITHM
+CRYPTO_AVAILABLE = _envelope.CRYPTO_AVAILABLE
+CRYPTO_IMPORT_ERROR = _envelope.CRYPTO_IMPORT_ERROR
+
+_codec = PrivacyEnvelopeCodec(ENVELOPE_SCHEMA)
 
 
-class PrivacyError(RuntimeError):
-    """Raised when local privacy encryption cannot complete safely."""
-
-
-def config_dir() -> Path:
-    return Path(__file__).resolve().parent / "config"
-
-
-def key_path(base_dir: str | os.PathLike[str] | None = None) -> Path:
-    return Path(base_dir) / KEY_FILE_NAME if base_dir is not None else config_dir() / KEY_FILE_NAME
-
-
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
-
-
-def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    try:
-        os.chmod(tmp_path, 0o600)
-    except OSError:
-        pass
-    tmp_path.replace(path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+def _keystore_required() -> None:
+    if not _keystore.keystore_exists():
+        raise PrivacyError(
+            "PRIVACY_KEYSTORE_UNINITIALIZED: Privacy keystore has not been created yet."
+        )
 
 
 def crypto_status(base_dir: str | os.PathLike[str] | None = None) -> Dict[str, Any]:
-    path = key_path(base_dir)
+    del base_dir
     return {
         "available": CRYPTO_AVAILABLE,
         "algorithm": ALGORITHM,
-        "keyExists": path.exists(),
-        "keyPath": str(path),
+        "keyExists": False,
+        "keyPath": "",
         "error": "" if CRYPTO_AVAILABLE else f"Python package 'cryptography' is required: {CRYPTO_IMPORT_ERROR}",
+        **_keystore.keystore_status(),
     }
 
 
-def _load_or_create_key(base_dir: str | os.PathLike[str] | None = None, create: bool = True) -> Tuple[bytes, str]:
-    if not CRYPTO_AVAILABLE:
-        raise PrivacyError(f"Python package 'cryptography' is required for privacy mode: {CRYPTO_IMPORT_ERROR}")
-
-    path = key_path(base_dir)
-    if path.exists():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            key = _b64url_decode(str(payload.get("key", "")))
-            key_id = str(payload.get("keyId", "")).strip()
-        except Exception as exc:  # noqa: BLE001 - bad local key should become a readable privacy error.
-            raise PrivacyError(f"Could not read privacy key file '{path}': {exc}") from exc
-        if len(key) != 32 or not key_id:
-            raise PrivacyError(f"Privacy key file '{path}' is malformed.")
-        return key, key_id
-
-    if not create:
-        raise PrivacyError(f"Privacy key file is missing: {path}")
-
-    key = secrets.token_bytes(32)
-    key_id = _b64url_encode(hashlib.sha256(key).digest()[:12])
-    _write_private_json(
-        path,
-        {
-            "version": 1,
-            "algorithm": ALGORITHM,
-            "keyId": key_id,
-            "key": _b64url_encode(key),
-        },
-    )
-    return key, key_id
-
-
 def is_encrypted_payload(value: Any) -> bool:
+    return _codec.is_encrypted_payload(value)
+
+
+def is_unsupported_encrypted_payload(value: Any) -> bool:
     if isinstance(value, str):
         try:
+            import json
+
             value = json.loads(value)
         except Exception:
             return False
     return (
         isinstance(value, Mapping)
         and value.get("encrypted") is True
-        and value.get("schema") == ENVELOPE_SCHEMA
+        and value.get("schema") == LEGACY_ENVELOPE_SCHEMA
         and value.get("algorithm") == ALGORITHM
     )
 
 
-def _aad(key_id: str) -> bytes:
-    return f"{ENVELOPE_SCHEMA}|{ENVELOPE_VERSION}|{ALGORITHM}|{key_id}".encode("utf-8")
-
-
 def encrypt_state(state: Mapping[str, Any], base_dir: str | os.PathLike[str] | None = None) -> Dict[str, Any]:
+    del base_dir
     normalized, warnings = normalize_state(state)
     if warnings:
         normalized["_normalizationWarnings"] = warnings
-    key, key_id = _load_or_create_key(base_dir, create=True)
-    nonce = secrets.token_bytes(12)
-    plaintext = state_to_json(normalized).encode("utf-8")
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext, _aad(key_id))  # type: ignore[operator]
-    return {
-        "version": ENVELOPE_VERSION,
-        "schema": ENVELOPE_SCHEMA,
-        "encrypted": True,
-        "algorithm": ALGORITHM,
-        "keyId": key_id,
-        "nonce": _b64url_encode(nonce),
-        "ciphertext": _b64url_encode(ciphertext),
-    }
+    _keystore_required()
+    return _codec.encrypt_state(normalized)
 
 
 def decrypt_state(payload: Any, base_dir: str | os.PathLike[str] | None = None) -> Tuple[Dict[str, Any], list[str]]:
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception as exc:
-            raise PrivacyError(f"Encrypted prompt manager data is not valid JSON: {exc}") from exc
-    if not is_encrypted_payload(payload):
-        raise PrivacyError("Prompt manager data is not an encrypted Smart Prompt Manager payload.")
-    key, key_id = _load_or_create_key(base_dir, create=False)
-    payload_key_id = str(payload.get("keyId", ""))
-    if payload_key_id != key_id:
-        raise PrivacyError("Encrypted prompt manager data was created with a different local privacy key.")
-    try:
-        nonce = _b64url_decode(str(payload.get("nonce", "")))
-        ciphertext = _b64url_decode(str(payload.get("ciphertext", "")))
-        plaintext = AESGCM(key).decrypt(nonce, ciphertext, _aad(key_id))  # type: ignore[operator]
-        loaded = json.loads(plaintext.decode("utf-8"))
-    except PrivacyError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - auth/tag/key failures should be user-readable.
-        raise PrivacyError(f"Could not decrypt prompt manager data: {exc}") from exc
+    del base_dir
+    if is_unsupported_encrypted_payload(payload):
+        raise PrivacyError(
+            "Encrypted Smart Prompt Manager data uses an unsupported legacy privacy schema."
+        )
+    _keystore_required()
+    loaded = _codec.decrypt_state(payload)
     state, warnings = normalize_state(loaded if isinstance(loaded, Mapping) else {})
     state["privacyMode"] = True
     return state, warnings
