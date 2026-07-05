@@ -456,6 +456,121 @@ assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
         self.assertIn("unsupportedPrivacyEnvelopeString(dataWidget.value)", source)
         self.assertIn("old privacy schema", source)
 
+    def test_helto_design_system_tokens_and_component_roles(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+
+        for token in [
+            "--helto-bg: #181825;",
+            "--helto-surface: #1e1e2e;",
+            "--helto-surface-2: #313244;",
+            "--helto-surface-3: #45475a;",
+            "--helto-surface-hover: #585b70;",
+            "--helto-accent: #fab387;",
+            "--helto-accent-strong: #fddcc4;",
+            "--helto-accent-border: #93664a;",
+            "--helto-focus: #89b4fa;",
+            "--helto-focus-ring: 0 0 0 3px rgba(137, 180, 250, 0.28);",
+            "--helto-danger: #f38ba8;",
+            "--helto-danger-border: #96526a;",
+            "--helto-font-size: 12px;",
+            "--helto-line: 1.4;",
+        ]:
+            self.assertIn(token, source)
+
+        for old_palette_value in [
+            "#0d1320",
+            "#151c2a",
+            "#1b2333",
+            "#f1c75c",
+            "#5e9bff",
+            "rgba(241,199,92",
+            "#4f4322",
+            "#3c3318",
+            "#5a2330",
+            "#471b25",
+        ]:
+            self.assertNotIn(old_palette_value, source)
+
+        self.assertIn(".spm-btn-primary,.spm-btn.is-active{border-color:var(--helto-accent-border);background:linear-gradient(180deg,#4f3a2a,#3d2d20);", source)
+        self.assertIn(".spm-btn-danger{border-color:var(--helto-danger-border);background:linear-gradient(180deg,#5c2c3d,#482331);", source)
+        self.assertIn(".spm-switch input:checked+.spm-switch-slider{background:var(--helto-accent-bg);border-color:var(--helto-accent-border)}", source)
+        self.assertIn(".spm-root input:not([type=checkbox]):focus", source)
+        self.assertIn(".spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(17,17,27,.72);", source)
+        self.assertIn(".spm-root,.spm-modal,.spm-prompt-list,.spm-preview,.spm-autocomplete{scrollbar-width:thin;scrollbar-color:rgba(137,180,250,.45) transparent}", source)
+
+    def test_helto_design_system_styles_actual_litegraph_node(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+
+        for snippet in [
+            'const SPM_WIDGET_THEME_BRIDGE_KEY = "__spmHeltoLiteGraphWidgetThemeBridgeInstalled";',
+            'const SPM_WIDGET_THEME_FALLBACK_KEY = "__spmHeltoLiteGraphWidgetThemeFallbackInstalled";',
+            'const SPM_WIDGET_THEME_SNAPSHOT_KEY = "__spmHeltoLiteGraphWidgetThemeSnapshot";',
+            "const SPM_HELTO = {",
+            "WIDGET_BGCOLOR: SPM_HELTO.bg,",
+            "WIDGET_OUTLINE_COLOR: SPM_HELTO.borderStrong,",
+            "WIDGET_PROMOTED_OUTLINE_COLOR: SPM_HELTO.accent,",
+            "WIDGET_ADVANCED_OUTLINE_COLOR: SPM_HELTO.focus,",
+            "function installSpmWidgetThemeBridge()",
+            "function ensureSpmWidgetThemeFallback(node)",
+            "function applySpmNodeTheme(node)",
+            "function patchSpmNodeTheme(nodeType)",
+            "node.color = SPM_HELTO.surface3;",
+            "node.bgcolor = SPM_HELTO.surface;",
+        ]:
+            self.assertIn(snippet, source)
+
+        bridge_start = source.index("function installSpmWidgetThemeBridge()")
+        bridge_end = source.index("function ensureSpmWidgetThemeFallback(node)", bridge_start)
+        bridge_block = source[bridge_start:bridge_end]
+        self.assertIn("prototype.drawNodeWidgets = function (node)", bridge_block)
+        self.assertIn("if (isSmartPromptManagerNode(node))", bridge_block)
+        self.assertIn("withSpmLiteGraphWidgetTheme(() => originalDrawNodeWidgets.apply(this, arguments))", bridge_block)
+        self.assertIn("return originalDrawNodeWidgets.apply(this, arguments);", bridge_block)
+
+        fallback_start = source.index("function ensureSpmWidgetThemeFallback(node)")
+        fallback_end = source.index("function applySpmNodeTheme(node)", fallback_start)
+        fallback_block = source[fallback_start:fallback_end]
+        self.assertIn("node.onDrawBackground = function ()", fallback_block)
+        self.assertIn("applySpmLiteGraphWidgetTheme()", fallback_block)
+        self.assertIn("node.onDrawForeground = function ()", fallback_block)
+        self.assertIn("restoreSpmLiteGraphWidgetTheme", fallback_block)
+
+        apply_start = source.index("function applySpmNodeTheme(node)")
+        apply_end = source.index("function patchSpmNodeTheme(nodeType)", apply_start)
+        apply_block = source[apply_start:apply_end]
+        self.assertIn("if (!isSmartPromptManagerNode(node)) return false;", apply_block)
+        self.assertIn("ensureSpmWidgetThemeFallback(node)", apply_block)
+        self.assertIn("node.setDirtyCanvas?.(true, true);", apply_block)
+        self.assertIn("node.graph?.setDirtyCanvas?.(true, true);", apply_block)
+
+        self.assertIn("installSpmWidgetThemeBridge();", source)
+        self.assertIn("for (const node of graphNodes())", source)
+        self.assertIn("applySpmNodeTheme(this);", source)
+        self.assertIn("nodeCreated(node) {", source)
+        self.assertIn("loadedGraphNode(node) {", source)
+
+    def test_helto_dialog_layout_classes_preserve_hidden_preview_contract(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+
+        for class_snippet in [
+            'class="spm-row spm-prompt-dialog-layout"',
+            'class="spm-prompt-dialog-sidebar"',
+            'class="spm-prompt-dialog-content"',
+            'class="spm-prompt-list spm-list-tall"',
+            'class="spm-prompt-list spm-list-short"',
+            'class="spm-autocomplete spm-autocomplete-main"',
+            'class="spm-autocomplete spm-autocomplete-dialog"',
+            'class="spm-muted spm-empty-list"',
+            'class="spm-folder-name"',
+        ]:
+            self.assertIn(class_snippet, source)
+
+        self.assertNotIn('style="', source)
+        self.assertIn('const previewPlaceholder = \'<span class="spm-muted">Preview hidden. Hover over the node to reveal it.</span>\';', source)
+        self.assertIn("Hidden prompt. Hover over the node to reveal it.", source)
+        self.assertIn("const revealSelectedPreview = !selectedPreviewHidden || previewRevealActive;", source)
+        self.assertIn("const revealItem = !itemHidden || previewRevealActive;", source)
+
     @unittest.skipUnless(HAS_PRIVACY_RECOVERY_UI, "helto-privacy 0.3.0 recovery UI is required")
     def test_shared_privacy_recovery_contract_for_smart_prompt_fields(self):
         script = r"""

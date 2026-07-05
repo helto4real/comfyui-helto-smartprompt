@@ -22,6 +22,9 @@ const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallSc
 const SPM_GRAPH_TO_PROMPT_WRAPPER_KEY = "__smartPromptManagerGraphToPromptWrapper";
 const SPM_GRAPH_TO_PROMPT_INSTALL_KEY = "__smartPromptManagerGraphToPromptInstallScheduled";
 const SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT = 80;
+const SPM_WIDGET_THEME_BRIDGE_KEY = "__spmHeltoLiteGraphWidgetThemeBridgeInstalled";
+const SPM_WIDGET_THEME_FALLBACK_KEY = "__spmHeltoLiteGraphWidgetThemeFallbackInstalled";
+const SPM_WIDGET_THEME_SNAPSHOT_KEY = "__spmHeltoLiteGraphWidgetThemeSnapshot";
 const VIRTUAL_FOLDERS = [
   { id: "all", name: "All" },
   { id: "unsorted", name: "Unsorted" },
@@ -64,6 +67,42 @@ const ICON_PATHS = {
   variable: "M8 4c-2 3-2 13 0 16M16 4c2 3 2 13 0 16M10 9h4M10 15h4",
 };
 
+// Raw token literal values, for LiteGraph canvas drawing where CSS custom
+// properties cannot be resolved. Keep these identical to injectStyles().
+const SPM_HELTO = {
+  bg: "#181825",
+  surface: "#1e1e2e",
+  surface2: "#313244",
+  surface3: "#45475a",
+  surfaceHover: "#585b70",
+  border: "#313244",
+  borderStrong: "#45475a",
+  borderHover: "#6c7086",
+  text: "#cdd6f4",
+  textDim: "#a6adc8",
+  textFaint: "#7f849c",
+  accent: "#fab387",
+  accentStrong: "#fddcc4",
+  accentBorder: "#93664a",
+  accentBg: "#46301f",
+  focus: "#89b4fa",
+  danger: "#f38ba8",
+  dangerBorder: "#96526a",
+  warn: "#f9e2af",
+  ok: "#a6e3a1",
+  info: "#74c7ec",
+};
+
+const SPM_LITEGRAPH_WIDGET_THEME = {
+  WIDGET_BGCOLOR: SPM_HELTO.bg,
+  WIDGET_OUTLINE_COLOR: SPM_HELTO.borderStrong,
+  WIDGET_PROMOTED_OUTLINE_COLOR: SPM_HELTO.accent,
+  WIDGET_ADVANCED_OUTLINE_COLOR: SPM_HELTO.focus,
+  WIDGET_TEXT_COLOR: SPM_HELTO.text,
+  WIDGET_SECONDARY_TEXT_COLOR: SPM_HELTO.textDim,
+  WIDGET_DISABLED_TEXT_COLOR: SPM_HELTO.textFaint,
+};
+
 function nowIso() {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
@@ -94,10 +133,127 @@ function isSmartPromptManagerNode(node) {
   return (
     node?.type === NODE_CLASS ||
     node?.comfyClass === NODE_CLASS ||
+    node?.class_type === NODE_CLASS ||
     node?.constructor?.type === NODE_CLASS ||
     node?.constructor?.comfyClass === NODE_CLASS ||
     node?.title === "Smart Prompt Manager"
   );
+}
+
+function isSmartPromptManagerNodeData(nodeData) {
+  return nodeData?.name === NODE_CLASS || nodeData?.display_name === "Smart Prompt Manager";
+}
+
+function liteGraphCanvasPrototype() {
+  return [
+    globalThis.LGraphCanvas?.prototype,
+    globalThis.LiteGraph?.LGraphCanvas?.prototype,
+    app.canvas?.constructor?.prototype,
+  ].find((prototype) => typeof prototype?.drawNodeWidgets === "function") || null;
+}
+
+function applySpmLiteGraphWidgetTheme(liteGraph = globalThis.LiteGraph) {
+  if (!liteGraph || typeof liteGraph !== "object") return null;
+  const previous = {};
+  for (const [key, value] of Object.entries(SPM_LITEGRAPH_WIDGET_THEME)) {
+    if (key in liteGraph) {
+      previous[key] = liteGraph[key];
+      liteGraph[key] = value;
+    }
+  }
+  return Object.keys(previous).length ? { liteGraph, previous } : null;
+}
+
+function restoreSpmLiteGraphWidgetTheme(snapshot) {
+  const { liteGraph, previous } = snapshot || {};
+  if (!liteGraph || !previous) return false;
+  for (const [key, value] of Object.entries(previous)) {
+    liteGraph[key] = value;
+  }
+  return true;
+}
+
+function withSpmLiteGraphWidgetTheme(callback, liteGraph = globalThis.LiteGraph) {
+  const snapshot = applySpmLiteGraphWidgetTheme(liteGraph);
+  try {
+    return callback?.();
+  } finally {
+    restoreSpmLiteGraphWidgetTheme(snapshot);
+  }
+}
+
+function installSpmWidgetThemeBridge() {
+  const prototype = liteGraphCanvasPrototype();
+  if (!prototype) return false;
+  if (prototype[SPM_WIDGET_THEME_BRIDGE_KEY]) return true;
+  const originalDrawNodeWidgets = prototype.drawNodeWidgets;
+  prototype[SPM_WIDGET_THEME_BRIDGE_KEY] = true;
+  prototype.drawNodeWidgets = function (node) {
+    if (isSmartPromptManagerNode(node)) {
+      return withSpmLiteGraphWidgetTheme(() => originalDrawNodeWidgets.apply(this, arguments));
+    }
+    return originalDrawNodeWidgets.apply(this, arguments);
+  };
+  return true;
+}
+
+function ensureSpmWidgetThemeFallback(node) {
+  if (!node || node[SPM_WIDGET_THEME_FALLBACK_KEY]) return;
+  node[SPM_WIDGET_THEME_FALLBACK_KEY] = true;
+
+  const originalDrawBackground = node.onDrawBackground;
+  node.onDrawBackground = function () {
+    restoreSpmLiteGraphWidgetTheme(this[SPM_WIDGET_THEME_SNAPSHOT_KEY]);
+    this[SPM_WIDGET_THEME_SNAPSHOT_KEY] = applySpmLiteGraphWidgetTheme();
+    try {
+      return originalDrawBackground?.apply(this, arguments);
+    } catch (error) {
+      restoreSpmLiteGraphWidgetTheme(this[SPM_WIDGET_THEME_SNAPSHOT_KEY]);
+      this[SPM_WIDGET_THEME_SNAPSHOT_KEY] = null;
+      throw error;
+    }
+  };
+
+  const originalDrawForeground = node.onDrawForeground;
+  node.onDrawForeground = function () {
+    try {
+      return originalDrawForeground?.apply(this, arguments);
+    } finally {
+      restoreSpmLiteGraphWidgetTheme(this[SPM_WIDGET_THEME_SNAPSHOT_KEY]);
+      this[SPM_WIDGET_THEME_SNAPSHOT_KEY] = null;
+    }
+  };
+}
+
+function applySpmNodeTheme(node) {
+  if (!isSmartPromptManagerNode(node)) return false;
+  if (!installSpmWidgetThemeBridge()) {
+    ensureSpmWidgetThemeFallback(node);
+  }
+  node.color = SPM_HELTO.surface3;
+  node.bgcolor = SPM_HELTO.surface;
+  node.setDirtyCanvas?.(true, true);
+  node.graph?.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function patchSpmNodeTheme(nodeType) {
+  if (nodeType.prototype.__spmHeltoNodeThemePatched) return;
+  nodeType.prototype.__spmHeltoNodeThemePatched = true;
+
+  const originalCreated = nodeType.prototype.onNodeCreated;
+  nodeType.prototype.onNodeCreated = function () {
+    const result = originalCreated?.apply(this, arguments);
+    applySpmNodeTheme(this);
+    return result;
+  };
+
+  const originalConfigure = nodeType.prototype.configure;
+  nodeType.prototype.configure = function () {
+    const result = originalConfigure?.apply(this, arguments);
+    applySpmNodeTheme(this);
+    return result;
+  };
 }
 
 function defaultGraph() {
@@ -1434,46 +1590,81 @@ function injectStyles() {
   const style = document.createElement("style");
   style.id = "spm-styles";
   style.textContent = `
-    /* ---- Helto Design System tokens (inlined :root, canonical values) ---- */
-    :root{
-      --helto-bg:#0d1320;--helto-surface:#151c2a;--helto-surface-2:#1b2333;--helto-surface-3:#232d3f;--helto-surface-hover:#2c3850;
-      --helto-border:#2a3346;--helto-border-strong:#3a465c;--helto-border-hover:#4c5970;
-      --helto-text:#e7ebf3;--helto-text-dim:#9aa6bd;--helto-text-faint:#6f7c95;
-      --helto-accent:#f1c75c;--helto-accent-strong:#ffd873;--helto-accent-bg:rgba(241,199,92,.16);--helto-accent-border:rgba(241,199,92,.55);
-      --helto-focus:#5e9bff;--helto-focus-ring:0 0 0 2px rgba(94,155,255,.5);
-      --helto-danger:#ec5a6b;--helto-danger-bg:#3a1a22;--helto-danger-border:#8f3a44;
-      --helto-warn:#ffe3a3;
-      --helto-radius-sm:5px;--helto-radius:6px;--helto-radius-lg:10px;
-      --helto-font-sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-      --helto-font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Roboto Mono",monospace;
-      --helto-shadow:0 1px 2px rgba(0,0,0,.35);--helto-shadow-pop:0 14px 36px rgba(0,0,0,.55);--helto-shadow-glow:0 0 10px rgba(241,199,92,.35);
-      --helto-transition:.12s ease;--helto-ease-spring:cubic-bezier(.34,1.56,.64,1);
+    /* ---- Helto Design System tokens (canonical Catppuccin Mocha) ---- */
+    :root {
+      --helto-bg: #181825;
+      --helto-surface: #1e1e2e;
+      --helto-surface-2: #313244;
+      --helto-surface-3: #45475a;
+      --helto-surface-hover: #585b70;
+      --helto-border: #313244;
+      --helto-border-strong: #45475a;
+      --helto-border-hover: #6c7086;
+      --helto-text: #cdd6f4;
+      --helto-text-dim: #a6adc8;
+      --helto-text-faint: #7f849c;
+      --helto-accent: #fab387;
+      --helto-accent-strong: #fddcc4;
+      --helto-accent-border: #93664a;
+      --helto-accent-bg: #46301f;
+      --helto-focus: #89b4fa;
+      --helto-focus-ring: 0 0 0 3px rgba(137, 180, 250, 0.28);
+      --helto-danger: #f38ba8;
+      --helto-danger-border: #96526a;
+      --helto-ok: #a6e3a1;
+      --helto-warn: #f9e2af;
+      --helto-info: #74c7ec;
+      --helto-radius-sm: 5px;
+      --helto-radius: 6px;
+      --helto-radius-lg: 10px;
+      --helto-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      --helto-shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+      --helto-shadow-glow: 0 0 0 1px rgba(250, 179, 135, 0.35),
+                           0 0 12px rgba(250, 179, 135, 0.22);
+      --helto-transition: 0.12s ease;
+      --helto-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+      --helto-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --helto-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --helto-font-size: 12px;
+      --helto-line: 1.4;
     }
 
     /* ---- Root / layout ---- */
     .spm-widget-frame{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:visible}
-    .spm-root{font:12px/1.4 var(--helto-font-sans);color:var(--helto-text);background:var(--helto-surface);border:1px solid var(--helto-border);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow);padding:9px;width:100%;height:100%;overflow:auto;box-sizing:border-box;overscroll-behavior:contain;-webkit-font-smoothing:antialiased}
+    .spm-root{font:var(--helto-font-size)/var(--helto-line) var(--helto-font-sans);color:var(--helto-text);background:var(--helto-surface);border:1px solid var(--helto-border);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow);padding:9px;width:100%;height:100%;overflow:auto;box-sizing:border-box;overscroll-behavior:contain;-webkit-font-smoothing:antialiased}
     .spm-root *,.spm-root *::before,.spm-root *::after{box-sizing:border-box}
-    .spm-row{display:flex;gap:6px;align-items:center;margin:6px 0}.spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+    .spm-row{display:flex;gap:6px;align-items:center;margin:6px 0}
+    .spm-row-wrap{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
     .spm-spacer{flex:1 1 auto}
+    .spm-field-full{width:100%}
+    .spm-field-compact{margin:4px 0 6px}
+    .spm-flex-fill{flex:1 1 auto;min-width:0}
+    .spm-empty-list{padding:6px}
 
     /* ---- Inputs ---- */
-    .spm-root input,.spm-root textarea,.spm-root select{background:var(--helto-surface-2);color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:5px 8px;font:inherit;box-sizing:border-box;transition:border-color var(--helto-transition),box-shadow var(--helto-transition)}
-    .spm-root textarea{width:100%;resize:vertical;min-height:54px;line-height:1.4}.spm-root input[type=text],.spm-root select{min-width:0}
-    .spm-root select{cursor:pointer}
-    .spm-root input::placeholder,.spm-root textarea::placeholder{color:var(--helto-text-faint)}
-    .spm-root input:focus,.spm-root textarea:focus,.spm-root select:focus,.spm-modal input:focus,.spm-modal textarea:focus,.spm-modal select:focus,.spm-btn:focus-visible{outline:none;border-color:var(--helto-focus);box-shadow:var(--helto-focus-ring)}
+    .spm-root input:not([type=checkbox]),.spm-root textarea,.spm-root select,.spm-modal input:not([type=checkbox]),.spm-modal textarea,.spm-modal select{background:var(--helto-surface-2);color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);font:inherit;box-sizing:border-box;transition:border-color var(--helto-transition),box-shadow var(--helto-transition)}
+    .spm-root input:not([type=checkbox]),.spm-modal input:not([type=checkbox]){height:26px;padding:0 8px}
+    .spm-root textarea,.spm-modal textarea{width:100%;padding:7px 9px;resize:vertical;min-height:54px;line-height:var(--helto-line)}
+    .spm-root input[type=text],.spm-root select,.spm-modal input[type=text],.spm-modal select{min-width:0}
+    .spm-root select,.spm-modal select{height:24px;padding:0 8px;cursor:pointer}
+    .spm-root select option,.spm-modal select option{background:var(--helto-surface-2);color:var(--helto-text)}
+    .spm-root select option:checked,.spm-root select option:hover,.spm-modal select option:checked,.spm-modal select option:hover{background:var(--helto-surface-hover)}
+    .spm-root input::placeholder,.spm-root textarea::placeholder,.spm-modal input::placeholder,.spm-modal textarea::placeholder{color:var(--helto-text-faint)}
+    .spm-root label>input[type=checkbox],.spm-modal label>input[type=checkbox]{width:14px;height:14px;margin:0 5px 0 0;accent-color:var(--helto-accent)}
+    .spm-root label,.spm-modal label{color:var(--helto-text-dim);font:inherit}
+    .spm-root input:not([type=checkbox]):focus,.spm-root textarea:focus,.spm-root select:focus,.spm-modal input:not([type=checkbox]):focus,.spm-modal textarea:focus,.spm-modal select:focus,.spm-btn:focus-visible{outline:none;border-color:var(--helto-focus);box-shadow:var(--helto-focus-ring)}
 
     /* ---- Buttons (icon-only, raised gradient; gold=active/primary, red=danger) ---- */
-    .spm-btn{background:linear-gradient(180deg,var(--helto-surface-3),var(--helto-surface-2));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:0;cursor:pointer;font:inherit;white-space:nowrap;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;transition:background var(--helto-transition),border-color var(--helto-transition),color var(--helto-transition),box-shadow var(--helto-transition),transform .03s ease}
-    .spm-btn:hover{background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));border-color:var(--helto-border-hover);color:#fff}
-    .spm-btn:active{transform:translateY(1px)}.spm-btn:disabled{opacity:.4;cursor:not-allowed}
-    .spm-btn-primary{border-color:var(--helto-accent-border);background:linear-gradient(180deg,#4f4322,#3c3318);color:var(--helto-accent-strong)}
-    .spm-btn-primary:hover{background:linear-gradient(180deg,#5b4d27,#46391b);color:#fff3cf}
-    .spm-btn-danger{border-color:var(--helto-danger-border);background:linear-gradient(180deg,#5a2330,#471b25);color:#ffd6dc}
-    .spm-btn-danger:hover{border-color:#d0505f;background:linear-gradient(180deg,#6e2937,#57212c);color:#fff3f5}
+    .spm-btn{background:linear-gradient(180deg,var(--helto-surface-3),var(--helto-surface-2));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:0;cursor:pointer;font:inherit;white-space:nowrap;width:28px;min-width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:0 0 auto;transition:background var(--helto-transition),border-color var(--helto-transition),color var(--helto-transition),box-shadow var(--helto-transition),transform .03s ease}
+    .spm-btn:hover:not(:disabled){background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));border-color:var(--helto-border-hover);color:var(--helto-text)}
+    .spm-btn:active:not(:disabled){transform:translateY(1px)}
+    .spm-btn:disabled{opacity:.4;cursor:not-allowed}
+    .spm-btn-primary,.spm-btn.is-active{border-color:var(--helto-accent-border);background:linear-gradient(180deg,#4f3a2a,#3d2d20);color:var(--helto-accent-strong);box-shadow:inset 0 0 0 1px rgba(250,179,135,.18)}
+    .spm-btn-primary:hover:not(:disabled),.spm-btn.is-active:hover:not(:disabled){background:linear-gradient(180deg,#5d4531,#493626);color:var(--helto-accent-strong)}
+    .spm-btn-danger{border-color:var(--helto-danger-border);background:linear-gradient(180deg,#5c2c3d,#482331);color:var(--helto-danger)}
+    .spm-btn-danger:hover:not(:disabled){border-color:#c56d8c;background:linear-gradient(180deg,#6e3549,#5a2a3c);color:var(--helto-danger)}
     .spm-btn-quiet{background:linear-gradient(180deg,var(--helto-surface-2),var(--helto-surface));color:var(--helto-text-dim)}
-    .spm-btn-quiet:hover{background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));color:#fff}
+    .spm-btn-quiet:hover:not(:disabled){background:linear-gradient(180deg,var(--helto-surface-hover),var(--helto-surface-3));color:var(--helto-text)}
     .spm-icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;display:block}
     .spm-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 
@@ -1501,60 +1692,78 @@ function injectStyles() {
 
     /* ---- Prompt list (inset well; selected=gold) ---- */
     .spm-prompt-list{max-height:96px;overflow:auto;border:1px solid var(--helto-border);border-radius:var(--helto-radius);background:var(--helto-bg);box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+    .spm-prompt-list.spm-list-tall{max-height:446px}
+    .spm-prompt-list.spm-list-short{max-height:128px;margin-bottom:10px}
     .spm-prompt-item{display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid var(--helto-border);cursor:pointer;color:var(--helto-text);transition:background var(--helto-transition),color var(--helto-transition)}
     .spm-prompt-item:last-child{border-bottom:0}
-    .spm-prompt-item:hover{background:var(--helto-surface-hover);color:#fff}
+    .spm-prompt-item:hover{background:var(--helto-surface-hover);color:var(--helto-text)}
     .spm-prompt-item.is-selected{background:var(--helto-accent-bg);color:var(--helto-accent-strong);box-shadow:inset 2px 0 0 var(--helto-accent)}
     .spm-prompt-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .spm-muted{color:var(--helto-text-dim)}.spm-mini{font-size:11px;color:var(--helto-text-faint)}
+    .spm-muted{color:var(--helto-text-dim)}
+    .spm-mini,.spm-root label.spm-mini,.spm-modal label.spm-mini{font-size:11px;color:var(--helto-text-faint)}
 
     /* ---- Preview wells ---- */
     .spm-preview{white-space:pre-wrap;line-height:1.45;font-family:var(--helto-font-mono);background:var(--helto-bg);border:1px solid var(--helto-border);border-radius:var(--helto-radius-sm);padding:7px 9px;min-height:28px;max-height:76px;overflow:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
     .spm-var{background:var(--helto-accent-bg);color:var(--helto-accent-strong);border:1px solid var(--helto-accent-border);border-radius:var(--helto-radius-sm);padding:0 3px}
-    .spm-var-warn{background:var(--helto-danger-bg);color:#ffd6dc;border-color:var(--helto-danger-border)}
+    .spm-var-warn{border-color:var(--helto-danger-border);background:linear-gradient(180deg,#5c2c3d,#482331);color:var(--helto-danger)}
 
     /* ---- Grids / warnings ---- */
-    .spm-grid{display:grid;grid-template-columns:1fr 76px 1.2fr 1fr 1fr 1.2fr 28px;gap:5px;align-items:start}.spm-grid-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
+    .spm-grid{display:grid;grid-template-columns:1fr 76px 1.2fr 1fr 1fr 1.2fr 28px;gap:5px;align-items:start}
+    .spm-grid-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
     .spm-grid textarea{min-height:34px}
-    .spm-warn{background:#332711;border:1px solid #7a5e28;color:var(--helto-warn);border-radius:var(--helto-radius);padding:7px 10px;margin-top:6px}
+    .spm-warn{padding:7px 10px;border:1px solid #7d5a41;border-radius:var(--helto-radius);background:#30231a;color:#f8d0ae;box-shadow:var(--helto-shadow-pop);margin-top:6px}
 
     /* ---- Autocomplete / tooltip (pop surfaces) ---- */
     .spm-autocomplete{position:absolute;z-index:10000;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow-pop);max-height:150px;overflow:auto;min-width:210px;padding:5px;animation:spm-pop .15s var(--helto-ease-spring)}
+    .spm-autocomplete-main{left:10px;top:258px}
+    .spm-autocomplete-dialog{display:none;left:8px;top:250px}
     .spm-suggestion{display:flex;gap:8px;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:var(--helto-radius-sm);cursor:pointer;color:var(--helto-text)}
-    .spm-suggestion:hover{background:var(--helto-surface-hover);color:#fff}
-    .spm-suggestion.is-active{background:var(--helto-surface-hover);color:#fff;box-shadow:inset 2px 0 0 var(--helto-accent)}
+    .spm-suggestion:hover{background:var(--helto-surface-hover);color:var(--helto-text)}
+    .spm-suggestion.is-active{background:var(--helto-surface-hover);color:var(--helto-text);box-shadow:inset 2px 0 0 var(--helto-accent)}
     .spm-suggestion-name{font-weight:600;color:inherit}
     .spm-copybox{width:100%;min-height:54px;font-family:var(--helto-font-mono)}
-    .spm-tooltip{position:absolute;z-index:10001;max-width:320px;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);padding:8px 10px;color:var(--helto-text);box-shadow:var(--helto-shadow-pop);pointer-events:none;font:12px/1.4 var(--helto-font-sans)}
+    .spm-tooltip{position:absolute;z-index:10001;max-width:320px;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);padding:8px 10px;color:var(--helto-text);box-shadow:var(--helto-shadow-pop);pointer-events:none;font:var(--helto-font-size)/var(--helto-line) var(--helto-font-sans)}
     @keyframes spm-pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
     @keyframes spm-fade{from{opacity:0}to{opacity:1}}
     @keyframes spm-rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
 
     /* ---- Modal / overlay ---- */
-    .spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(6,9,15,.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;animation:spm-fade .2s ease}
-    .spm-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:linear-gradient(135deg,rgba(27,35,51,.92),rgba(13,19,32,.96));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-lg);box-shadow:var(--helto-shadow-pop);backdrop-filter:blur(15px);padding:14px;box-sizing:border-box;font:13px/1.4 var(--helto-font-sans);animation:spm-rise .2s var(--helto-ease-spring)}
+    .spm-modal-backdrop{position:fixed;inset:0;z-index:9999;background:rgba(17,17,27,.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;animation:spm-fade .2s ease}
+    .spm-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:linear-gradient(135deg,rgba(49,50,68,.92),rgba(24,24,37,.96));color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-lg);box-shadow:var(--helto-shadow-pop);backdrop-filter:blur(15px);padding:14px;box-sizing:border-box;font:var(--helto-font-size)/var(--helto-line) var(--helto-font-sans);animation:spm-rise .2s var(--helto-ease-spring)}
     .spm-modal *,.spm-modal *::before,.spm-modal *::after{box-sizing:border-box}
-    .spm-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--helto-border);padding-bottom:10px;margin-bottom:12px}.spm-modal-title{font-weight:700;font-size:14px;letter-spacing:.02em}
-    .spm-modal input,.spm-modal textarea,.spm-modal select{background:var(--helto-surface-2);color:var(--helto-text);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius-sm);padding:6px 8px;font:inherit;box-sizing:border-box}
-    .spm-modal select{cursor:pointer}.spm-modal input::placeholder,.spm-modal textarea::placeholder{color:var(--helto-text-faint)}
-    .spm-modal textarea{width:100%;resize:vertical}.spm-dialog-editor{min-height:220px;font-family:var(--helto-font-mono)}.spm-dialog-description{min-height:70px}
-    .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:8px 0}.spm-modal .spm-preview{max-height:170px}
-    .spm-modal-field{display:flex;flex-direction:column;gap:5px;flex:1}.spm-modal-field label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
-    .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:6px;align-items:start}.spm-modal-grid textarea{min-height:54px}
-    .spm-node-summary{background:var(--helto-bg);border:1px solid var(--helto-border);border-radius:var(--helto-radius-sm);padding:7px 9px;line-height:1.35;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}.spm-node-summary-title{font-weight:600;color:var(--helto-text);overflow-wrap:anywhere}
+    .spm-modal-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--helto-border);padding-bottom:10px;margin-bottom:12px}
+    .spm-modal-title{font-weight:700;font-size:14px;letter-spacing:.02em;color:var(--helto-text)}
+    .spm-modal textarea{width:100%;resize:vertical}
+    .spm-dialog-editor{min-height:220px;font-family:var(--helto-font-mono)}
+    .spm-dialog-description{min-height:70px}
+    .spm-modal .spm-row,.spm-modal .spm-row-wrap{margin:8px 0}
+    .spm-modal .spm-preview{max-height:170px}
+    .spm-modal-field{display:flex;flex-direction:column;gap:5px;flex:1}
+    .spm-modal-field.is-relative{position:relative}
+    .spm-modal-field label,.spm-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--helto-text-faint)}
+    .spm-modal-grid{display:grid;grid-template-columns:minmax(110px,1fr) 92px minmax(170px,1.4fr) minmax(110px,1fr) minmax(110px,1fr) minmax(150px,1.2fr) 34px;gap:6px;align-items:start}
+    .spm-modal-grid textarea{min-height:54px}
+    .spm-prompt-dialog-layout{align-items:stretch;gap:12px}
+    .spm-prompt-dialog-sidebar{width:260px;min-width:220px;flex:0 0 260px}
+    .spm-prompt-dialog-content{flex:1 1 auto;min-width:0}
+    .spm-folder-name{flex:1 1 auto;min-width:0}
+    .spm-node-summary{background:var(--helto-bg);border:1px solid var(--helto-border);border-radius:var(--helto-radius-sm);padding:7px 9px;line-height:1.35;box-shadow:inset 0 1px 0 rgba(255,255,255,.02)}
+    .spm-node-summary-title{font-weight:600;color:var(--helto-text);overflow-wrap:anywhere}
+    @media (max-width:700px){.spm-prompt-dialog-layout{flex-direction:column}.spm-prompt-dialog-sidebar{width:auto;min-width:0;flex:1 1 auto}}
 
     /* ---- Thin scrollbars ---- */
-    .spm-root,.spm-modal,.spm-prompt-list,.spm-preview,.spm-autocomplete{scrollbar-width:thin;scrollbar-color:var(--helto-border-strong) transparent}
-    .spm-root::-webkit-scrollbar,.spm-modal::-webkit-scrollbar,.spm-prompt-list::-webkit-scrollbar,.spm-preview::-webkit-scrollbar,.spm-autocomplete::-webkit-scrollbar{width:6px;height:6px}
+    .spm-root,.spm-modal,.spm-prompt-list,.spm-preview,.spm-autocomplete{scrollbar-width:thin;scrollbar-color:rgba(137,180,250,.45) transparent}
+    .spm-root::-webkit-scrollbar,.spm-modal::-webkit-scrollbar,.spm-prompt-list::-webkit-scrollbar,.spm-preview::-webkit-scrollbar,.spm-autocomplete::-webkit-scrollbar{width:8px;height:8px}
     .spm-root::-webkit-scrollbar-track,.spm-modal::-webkit-scrollbar-track,.spm-prompt-list::-webkit-scrollbar-track,.spm-preview::-webkit-scrollbar-track,.spm-autocomplete::-webkit-scrollbar-track{background:transparent}
-    .spm-root::-webkit-scrollbar-thumb,.spm-modal::-webkit-scrollbar-thumb,.spm-prompt-list::-webkit-scrollbar-thumb,.spm-preview::-webkit-scrollbar-thumb,.spm-autocomplete::-webkit-scrollbar-thumb{background:var(--helto-border-strong);border-radius:3px}
-    .spm-root::-webkit-scrollbar-thumb:hover,.spm-modal::-webkit-scrollbar-thumb:hover,.spm-prompt-list::-webkit-scrollbar-thumb:hover,.spm-preview::-webkit-scrollbar-thumb:hover,.spm-autocomplete::-webkit-scrollbar-thumb:hover{background:var(--helto-text-faint)}
+    .spm-root::-webkit-scrollbar-thumb,.spm-modal::-webkit-scrollbar-thumb,.spm-prompt-list::-webkit-scrollbar-thumb,.spm-preview::-webkit-scrollbar-thumb,.spm-autocomplete::-webkit-scrollbar-thumb{background:rgba(137,180,250,.45);border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+    .spm-root::-webkit-scrollbar-thumb:hover,.spm-modal::-webkit-scrollbar-thumb:hover,.spm-prompt-list::-webkit-scrollbar-thumb:hover,.spm-preview::-webkit-scrollbar-thumb:hover,.spm-autocomplete::-webkit-scrollbar-thumb:hover{background:rgba(137,180,250,.7);background-clip:padding-box}
   `;
   document.head.appendChild(style);
 }
 
 function enhanceNode(node) {
   injectStyles();
+  applySpmNodeTheme(node);
   const dataWidget = node.widgets?.find((widget) => widget.name === SPM_PRIVACY_FIELD);
   if (!dataWidget || node.__spmEnhanced) return;
   node.__spmEnhanced = true;
@@ -2303,7 +2512,7 @@ function enhanceNode(node) {
 
   function renderAutocomplete() {
     if (!autocomplete.open) return "";
-    return `<div class="spm-autocomplete" style="left:10px;top:258px">
+    return `<div class="spm-autocomplete spm-autocomplete-main">
       ${autocomplete.items
         .map((name, index) => {
           const definition = state.variables[name];
@@ -2436,18 +2645,18 @@ function enhanceNode(node) {
             ${iconButton("close", "Close", 'data-dialog-action="close"', "spm-btn-quiet")}
           </div>
         </div>
-        <div class="spm-row" style="align-items:stretch">
-          <div style="width:260px;min-width:220px">
+        <div class="spm-row spm-prompt-dialog-layout">
+          <div class="spm-prompt-dialog-sidebar">
             <div class="spm-row-wrap">
               ${iconButton("add", "Add prompt", 'data-dialog-action="add-prompt"', "spm-btn-primary")}
               ${iconButton("duplicate", "Duplicate prompt", 'data-dialog-action="duplicate-prompt"')}
               ${iconButton("delete", "Delete prompt", `data-dialog-action="delete-prompt" ${isDraft ? "disabled" : ""}`, "spm-btn-danger")}
             </div>
-            <select data-dialog-folder-filter style="width:100%;margin:4px 0 6px">${filterOptions}</select>
-            <input type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts" style="width:100%;margin:4px 0 6px">
-            <div class="spm-prompt-list" style="max-height:446px">${isDraft ? `<div class="spm-prompt-item is-selected" title="${escapeHtml(promptHoverPreview(prompt))}"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title || "Untitled prompt")}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted" style="padding:6px">No matching prompts.</div>'}</div>
+            <select class="spm-field-full spm-field-compact" data-dialog-folder-filter>${filterOptions}</select>
+            <input class="spm-field-full spm-field-compact" type="text" data-dialog-search value="${escapeHtml(dialogSearch)}" placeholder="Search prompts">
+            <div class="spm-prompt-list spm-list-tall">${isDraft ? `<div class="spm-prompt-item is-selected" title="${escapeHtml(promptHoverPreview(prompt))}"><span>☆</span><span class="spm-prompt-title">${escapeHtml(prompt.title || "Untitled prompt")}</span><span class="spm-mini">draft</span></div>` : ""}${promptList || '<div class="spm-muted spm-empty-list">No matching prompts.</div>'}</div>
           </div>
-          <div style="flex:1;min-width:0">
+          <div class="spm-prompt-dialog-content">
             <div class="spm-row">
               <div class="spm-modal-field"><label>Title</label><input type="text" data-dialog-prompt-field="title" value="${escapeHtml(prompt.title || "")}" ${prompt.locked ? "disabled" : ""}></div>
             </div>
@@ -2461,7 +2670,7 @@ function enhanceNode(node) {
               <label title="Hide this prompt preview until the node is hovered"><input type="checkbox" title="Hide this prompt preview until the node is hovered" data-dialog-prompt-bool="hidden" ${prompt.hidden ? "checked" : ""}> Hidden preview</label>
             </div>
             <div class="spm-modal-field"><label>Description</label><textarea class="spm-dialog-description" data-dialog-prompt-field="description" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.description || "")}</textarea></div>
-            <div class="spm-modal-field" style="position:relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete" data-dialog-autocomplete style="display:none;left:8px;top:250px"></div></div>
+            <div class="spm-modal-field is-relative"><label>Prompt text</label><textarea class="spm-dialog-editor" data-dialog-prompt-field="text" ${prompt.locked ? "disabled" : ""}>${escapeHtml(prompt.text || "")}</textarea><div class="spm-autocomplete spm-autocomplete-dialog" data-dialog-autocomplete></div></div>
             <div class="spm-row-wrap">
               ${iconButton("copy", "Copy resolved prompt", 'data-dialog-action="copy-resolved"')}
               ${iconButton("json", "Copy prompt JSON", 'data-dialog-action="copy-prompt-json"')}
@@ -2817,7 +3026,7 @@ function enhanceNode(node) {
           const count = state.prompts.filter((prompt) => prompt.folderId === folder.id).length;
           return `<div class="spm-row" data-folder-row="${escapeHtml(folder.id)}">
             ${iconButton(state.selectedFolderId === folder.id ? "selected" : "select", state.selectedFolderId === folder.id ? "Selected folder" : "Select folder", `data-dialog-folder-select="${escapeHtml(folder.id)}"`, "spm-btn-quiet")}
-            <input type="text" data-dialog-folder-name="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" style="flex:1">
+            <input class="spm-folder-name" type="text" data-dialog-folder-name="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}">
             <label class="spm-mini" title="Hide previews for prompts in this folder until the node is hovered"><input type="checkbox" title="Hide previews for prompts in this folder until the node is hovered" data-dialog-folder-hidden="${escapeHtml(folder.id)}" ${folder.hidden ? "checked" : ""}> Hidden</label>
             <span class="spm-mini">${count} prompts</span>
             ${iconButton("delete", "Delete folder", `data-dialog-action="delete-folder" data-folder="${escapeHtml(folder.id)}"`, "spm-btn-danger")}
@@ -2833,7 +3042,7 @@ function enhanceNode(node) {
           </div>
         </div>
         <div class="spm-mini">Filter folders</div>
-        <div class="spm-prompt-list" style="max-height:128px;margin-bottom:10px">${virtualRows}</div>
+        <div class="spm-prompt-list spm-list-short">${virtualRows}</div>
         <div class="spm-mini">Editable folders</div>
         ${folderRows || '<div class="spm-muted">No custom folders yet.</div>'}
       `;
@@ -2981,7 +3190,7 @@ function enhanceNode(node) {
           <select data-field="selectedFolderId">${folderOptions}</select>
           <input type="text" data-field="search" value="${escapeHtml(state.search)}" placeholder="Search">
         </div>
-        <div class="spm-prompt-list">${list || '<div class="spm-muted" style="padding:6px">No prompts match.</div>'}</div>
+        <div class="spm-prompt-list">${list || '<div class="spm-muted spm-empty-list">No prompts match.</div>'}</div>
       </details>
       <details class="spm-section" open><summary>Selected Prompt</summary>
         <div class="spm-node-summary">
@@ -3330,9 +3539,15 @@ app.registerExtension({
     scheduleSpmSeedQueuePatch("setup");
     scheduleSpmGraphToPromptPatch("setup");
     void registerSpmPrivacyRecovery();
+    installSpmWidgetThemeBridge();
+    requestAnimationFrame(() => {
+      for (const node of graphNodes()) {
+        applySpmNodeTheme(node);
+      }
+    });
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== NODE_CLASS) return;
+    if (!isSmartPromptManagerNodeData(nodeData)) return;
     const originalConfigure = nodeType.prototype.configure;
     nodeType.prototype.configure = function configure(data) {
       normalizeSpmWidgetsValuesForConfigure(data);
@@ -3346,9 +3561,19 @@ app.registerExtension({
 
     const original = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function onNodeCreated() {
-      original?.apply(this, arguments);
+      const result = original?.apply(this, arguments);
       installSpmSeedControlPersistence(this);
       requestAnimationFrame(() => enhanceNode(this));
+      return result;
     };
+    patchSpmNodeTheme(nodeType);
+  },
+  nodeCreated(node) {
+    applySpmNodeTheme(node);
+    if (isSmartPromptManagerNode(node)) requestAnimationFrame(() => enhanceNode(node));
+  },
+  loadedGraphNode(node) {
+    applySpmNodeTheme(node);
+    if (isSmartPromptManagerNode(node)) requestAnimationFrame(() => enhanceNode(node));
   },
 });
