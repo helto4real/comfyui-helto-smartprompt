@@ -1,9 +1,15 @@
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
+
+import helto_privacy
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HELTO_PRIVACY_UI = Path(helto_privacy.__file__).resolve().parent / "web" / "privacy_ui.js"
+HELTO_PRIVACY_UI_SOURCE = HELTO_PRIVACY_UI.read_text(encoding="utf-8") if HELTO_PRIVACY_UI.is_file() else ""
+HAS_PRIVACY_RECOVERY_UI = "registerPrivacyRecoveryDescriptors" in HELTO_PRIVACY_UI_SOURCE
 
 
 class SmartPromptManagerFrontendTests(unittest.TestCase):
@@ -416,8 +422,10 @@ assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
     def test_privacy_serialization_hooks_use_stable_envelope_reuse(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
-        self.assertIn("rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, initialEncryptedValue)", source)
+        self.assertIn("rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, envelopeString)", source)
         self.assertIn("encryptedOrReusePrivacyValue(node, SPM_PRIVACY_FIELD", source)
+        self.assertIn("privacy.ensureEncryptedPrivacyValue", source)
+        self.assertIn("Privacy encryption is required before Smart Prompt Manager can serialize private prompt data.", source)
         self.assertIn("node.onSerialize = function (info)", source)
         self.assertIn("writeSerializedSpmData(info, currentSerializedSpmData())", source)
         self.assertIn("dataWidget.serializeValue = async function", source)
@@ -434,9 +442,165 @@ assert.equal(fallbackToken, "spm-cache-v1:A {{mood}} portrait:9999:5");
         self.assertIn("const token = privacy?.getStoredPrivacyToken?.();", source)
         self.assertIn("if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;", source)
         self.assertIn("retryOnUnlock && await unlockSharedPrivacyForError(error)", source)
+        self.assertIn('const SPM_PRIVACY_RECOVERY_SOURCE = "comfyui-helto-smartprompt";', source)
+        self.assertIn("privacy.registerPrivacyRecoveryDescriptors(SPM_PRIVACY_RECOVERY_SOURCE", source)
+        self.assertIn("spmLockedPrivacyRecoveryDescriptor", source)
+        self.assertIn("locked-current-envelope", source)
+        self.assertIn("_spmPrivacyRecoveryLocked", source)
+        self.assertIn('name: SPM_PRIVACY_FIELD', source)
+        self.assertIn('label: "Prompt library"', source)
+        self.assertIn("showPrivacyRecoveryDialog", source)
+        self.assertIn('data-action="privacy-recovery"', source)
+        self.assertIn('data-action="reset-private-data"', source)
         self.assertIn("initialUnsupportedEncryptedValue", source)
         self.assertIn("unsupportedPrivacyEnvelopeString(dataWidget.value)", source)
         self.assertIn("old privacy schema", source)
+
+    @unittest.skipUnless(HAS_PRIVACY_RECOVERY_UI, "helto-privacy 0.3.0 recovery UI is required")
+    def test_shared_privacy_recovery_contract_for_smart_prompt_fields(self):
+        script = r"""
+import assert from "node:assert/strict";
+import * as privacy from "./privacy_ui.mjs";
+
+const SPM_SCHEMA = "helto.smart-prompt-manager";
+const LEGACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
+const DEFAULT_STATE = JSON.stringify({ version: 1, privacyMode: false, prompts: [] });
+
+function envelope(schema, id = schema) {
+  return JSON.stringify({
+    version: 1,
+    encrypted: true,
+    algorithm: "AES-256-GCM",
+    schema,
+    keyId: `key-${id}`,
+    nonce: `nonce-${id}`,
+    ciphertext: `ciphertext-${id}`,
+  });
+}
+
+function node(id, value, privacyMode = true) {
+  return {
+    id,
+    type: "SmartPromptManager",
+    title: `Smart ${id}`,
+    properties: { spmPrivacyMode: privacyMode },
+    widgets: [{ name: "spm_data", value }],
+    widgets_values: [value, 0, 0],
+    setDirtyCanvas() { this.dirty = true; },
+  };
+}
+
+function lockedNode(id, value) {
+  const result = node(id, value, true);
+  result._spmPrivacyRecoveryLocked = true;
+  return result;
+}
+
+let capturedPlaintext = "";
+privacy.registerPrivacyRecoveryDescriptors("comfyui-helto-smartprompt", [{
+  id: "smart-prompt-normal",
+  nodeType: "SmartPromptManager",
+  label: "Smart Prompt Manager",
+  schema: SPM_SCHEMA,
+  privacy: { property: "spmPrivacyMode", default: false },
+  fields: [{
+    kind: "widget",
+    name: "spm_data",
+    label: "Prompt library",
+    schema: SPM_SCHEMA,
+    defaultValue: DEFAULT_STATE,
+    sensitive: true,
+    resetOnlyForLegacy: true,
+    runtimeProperty: "_spmExecutionState",
+  }],
+  reencrypt: async (plaintext) => {
+    capturedPlaintext = plaintext;
+    return envelope(SPM_SCHEMA, "reencrypted");
+  },
+}, {
+  id: "smart-prompt-locked-current-envelope",
+  label: "Smart Prompt Manager locked library",
+  schema: SPM_SCHEMA,
+  match: (candidate) => (
+    candidate?.type === "SmartPromptManager"
+    && Boolean(candidate?._spmPrivacyRecoveryLocked)
+    && Boolean(candidate?.widgets?.find((item) => item.name === "spm_data")?.value)
+  ),
+  privacy: { property: "spmPrivacyMode", default: true },
+  fields: [{
+    kind: "widget",
+    name: "spm_data",
+    label: "Locked prompt library",
+    schema: SPM_SCHEMA,
+    defaultValue: DEFAULT_STATE,
+    sensitive: true,
+    resetOnlyForLegacy: true,
+    runtimeProperty: "_spmExecutionState",
+    acceptsEnvelope: () => false,
+  }],
+}]);
+
+const valid = node(1, envelope(SPM_SCHEMA, "valid"));
+const wrong = node(2, envelope("wrong.schema", "wrong"));
+const legacy = node(3, envelope(LEGACY_SCHEMA, "legacy"));
+const oldPrefix = node(4, "__HELTO_ENC__:SECRET_PROMPT_TEXT");
+const plaintext = node(5, JSON.stringify({ privacyMode: true, prompts: [{ text: "VERY_SECRET_PROMPT" }] }));
+const publicPlaintext = node(6, JSON.stringify({ privacyMode: false, prompts: [{ text: "public" }] }), false);
+const lockedCurrent = lockedNode(7, envelope(SPM_SCHEMA, "locked-current"));
+const graph = { nodes: [valid, wrong, legacy, oldPrefix, plaintext, publicPlaintext, lockedCurrent] };
+
+const issues = privacy.scanPrivacyRecoveryIssues(graph);
+assert.equal(issues.some((issue) => issue.nodeId === 1), false);
+assert.equal(issues.some((issue) => issue.nodeId === 6), false);
+assert.deepEqual(
+  issues.map((issue) => [issue.nodeId, issue.type]).sort(),
+  [
+    [2, "invalid_encrypted_value"],
+    [3, "invalid_encrypted_value"],
+    [4, "legacy_encrypted_value"],
+    [5, "plaintext_sensitive_value"],
+    [7, "invalid_encrypted_value"],
+  ],
+);
+
+const publicModel = JSON.stringify(privacy.buildPrivacyRecoveryDialogModel(issues));
+assert(!publicModel.includes("VERY_SECRET_PROMPT"));
+assert(!publicModel.includes("SECRET_PROMPT_TEXT"));
+
+const resetResult = await privacy.recoverPrivacyIssues({
+  action: "reset",
+  graph,
+  issues: issues.filter((issue) => [2, 3, 4, 7].includes(issue.nodeId)),
+});
+assert.equal(resetResult.ok, true);
+assert.equal(wrong.widgets[0].value, DEFAULT_STATE);
+assert.equal(legacy.widgets[0].value, DEFAULT_STATE);
+assert.equal(oldPrefix.widgets[0].value, DEFAULT_STATE);
+assert.equal(lockedCurrent.widgets[0].value, DEFAULT_STATE);
+
+const reencryptResult = await privacy.recoverPrivacyIssues({
+  action: "reencrypt",
+  graph,
+  issues: issues.filter((issue) => issue.nodeId === 5),
+});
+assert.equal(reencryptResult.ok, true);
+assert(capturedPlaintext.includes("VERY_SECRET_PROMPT"));
+assert.equal(JSON.parse(plaintext.widgets[0].value).schema, SPM_SCHEMA);
+assert.equal(plaintext.dirty, true);
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "privacy_ui.mjs").write_text(HELTO_PRIVACY_UI_SOURCE, encoding="utf-8")
+            script_path = tmp_path / "test.mjs"
+            script_path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                ["node", str(script_path)],
+                cwd=tmp_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_import_export_helpers_package_privacy_and_merge_behaviour(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"

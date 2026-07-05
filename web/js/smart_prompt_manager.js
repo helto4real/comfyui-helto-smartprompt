@@ -9,6 +9,8 @@ const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
 const SEED_MAX = 1125899906842624;
 const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
 const SPM_PRIVACY_FIELD = "spm_data";
+const SPM_PRIVACY_MODE_PROPERTY = "spmPrivacyMode";
+const SPM_PRIVACY_RECOVERY_SOURCE = "comfyui-helto-smartprompt";
 const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
 const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
 const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
@@ -27,6 +29,7 @@ const VIRTUAL_FOLDERS = [
 ];
 let spmQueuePromptDepth = 0;
 let spmSharedPrivacyModulePromise = null;
+let spmPrivacyRecoveryRegistered = false;
 const KEYS = {
   next: "n",
   previous: "p",
@@ -55,6 +58,7 @@ const ICON_PATHS = {
   paste: "M9 5h6M9 3h6v4H9zM7 5H5v16h14V5h-2",
   prompts: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5",
   reroll: "M4 4v6h6M20 20v-6h-6M20 9a7 7 0 0 0-12-4L4 10M4 15a7 7 0 0 0 12 4l4-5",
+  recovery: "M4 4v6h6M20 20v-6h-6M19 9a7 7 0 0 0-11-4L4 10M5 15a7 7 0 0 0 11 4l4-5",
   select: "M8 12h8M13 7l5 5-5 5",
   selected: "M20 6 9 17l-5-5",
   variable: "M8 4c-2 3-2 13 0 16M16 4c2 3 2 13 0 16M10 9h4M10 15h4",
@@ -157,6 +161,161 @@ async function unlockSharedPrivacyForError(error) {
   if (!privacy?.showPrivacyKeystoreDialog) return false;
   if (!isSharedPrivacyUnlockError(error) && !privacy.isPrivacyLockedError?.(error)) return false;
   return Boolean(await privacy.showPrivacyKeystoreDialog("auto"));
+}
+
+async function spmPrivacyPost(endpoint, payload, { retryOnUnlock = true } = {}) {
+  const privacy = await sharedPrivacyModule();
+  const headers = { "Content-Type": "application/json" };
+  const token = privacy?.getStoredPrivacyToken?.();
+  if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;
+  const response = await fetch(`/helto_spm/privacy/${endpoint}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  let result = {};
+  try {
+    result = text ? JSON.parse(text) : {};
+  } catch {
+    result = {};
+  }
+  if (!response.ok || result.ok === false || result.error) {
+    const error = new Error(result.error || text || `Privacy ${endpoint} failed.`);
+    if (retryOnUnlock && await unlockSharedPrivacyForError(error)) {
+      return await spmPrivacyPost(endpoint, payload, { retryOnUnlock: false });
+    }
+    throw error;
+  }
+  return result;
+}
+
+function serializedDefaultState() {
+  return JSON.stringify(defaultState(), null, 2);
+}
+
+function parseRecoveryPlaintextState(plaintext) {
+  if (typeof plaintext === "string") {
+    return normalizeState(JSON.parse(plaintext));
+  }
+  return normalizeState(plaintext);
+}
+
+async function encryptRecoveryPlaintextState(plaintext, { retryOnUnlock = false } = {}) {
+  const result = await spmPrivacyPost(
+    "encrypt",
+    { state: parseRecoveryPlaintextState(plaintext) },
+    { retryOnUnlock },
+  );
+  return result.envelope;
+}
+
+function deriveSpmRecoveryPrivacyMode(value) {
+  if (isAnyEncryptedStateValue(value)) return true;
+  const parsed = parseJsonObject(value);
+  if (!parsed || typeof parsed !== "object") return false;
+  return Boolean(parsed.privacyMode);
+}
+
+function syncSpmRecoveryPrivacyModeProperty(node, value = widgetByName(node, SPM_PRIVACY_FIELD)?.value) {
+  if (!isSmartPromptManagerNode(node)) return false;
+  const enabled = typeof value === "boolean" ? value : deriveSpmRecoveryPrivacyMode(value);
+  node.properties ||= {};
+  if (node.properties[SPM_PRIVACY_MODE_PROPERTY] === enabled) return false;
+  node.properties[SPM_PRIVACY_MODE_PROPERTY] = enabled;
+  return true;
+}
+
+function syncSpmRecoveryPrivacyProperties(graph = defaultGraph()) {
+  for (const graphNode of graphNodes(graph)) {
+    if (!isSmartPromptManagerNode(graphNode)) continue;
+    syncSpmRecoveryPrivacyModeProperty(graphNode);
+  }
+}
+
+function setSpmRecoveryLockedState(node, locked) {
+  if (!isSmartPromptManagerNode(node)) return;
+  if (locked) {
+    node._spmPrivacyRecoveryLocked = true;
+  } else {
+    delete node._spmPrivacyRecoveryLocked;
+  }
+}
+
+function clearSpmRecoveryRuntimeState(targetNode) {
+  forgetPrivacyEnvelope(targetNode, SPM_PRIVACY_FIELD);
+  delete targetNode?._spmExecutionState;
+  setSpmRecoveryLockedState(targetNode, false);
+  syncSpmRecoveryPrivacyModeProperty(targetNode, false);
+  syncSpmSerializedWidgetValues(targetNode, {
+    spmDataValue: widgetByName(targetNode, SPM_PRIVACY_FIELD)?.value,
+    dirty: false,
+  });
+}
+
+function spmPrivacyRecoveryDescriptor() {
+  return {
+    nodeType: NODE_CLASS,
+    label: "Smart Prompt Manager",
+    schema: SPM_PRIVACY_SCHEMA,
+    privacy: { property: SPM_PRIVACY_MODE_PROPERTY, default: false },
+    fields: [
+      {
+        kind: "widget",
+        name: SPM_PRIVACY_FIELD,
+        label: "Prompt library",
+        schema: SPM_PRIVACY_SCHEMA,
+        defaultValue: serializedDefaultState,
+        sensitive: true,
+        resetOnlyForLegacy: true,
+        runtimeProperty: "_spmExecutionState",
+        clearRuntimeState: clearSpmRecoveryRuntimeState,
+      },
+    ],
+    reencrypt: async (plaintext) => encryptRecoveryPlaintextState(plaintext, { retryOnUnlock: false }),
+    clearRuntimeState: (targetNode) => syncSpmRecoveryPrivacyModeProperty(targetNode),
+  };
+}
+
+function spmLockedPrivacyRecoveryDescriptor() {
+  return {
+    id: `${SPM_PRIVACY_RECOVERY_SOURCE}:locked-current-envelope`,
+    label: "Smart Prompt Manager locked library",
+    schema: SPM_PRIVACY_SCHEMA,
+    match: (candidate) => (
+      isSmartPromptManagerNode(candidate)
+      && Boolean(candidate?._spmPrivacyRecoveryLocked)
+      && Boolean(encryptedPrivacyEnvelopeString(widgetByName(candidate, SPM_PRIVACY_FIELD)?.value))
+    ),
+    privacy: { property: SPM_PRIVACY_MODE_PROPERTY, default: true },
+    fields: [
+      {
+        kind: "widget",
+        name: SPM_PRIVACY_FIELD,
+        label: "Locked prompt library",
+        schema: SPM_PRIVACY_SCHEMA,
+        defaultValue: serializedDefaultState,
+        sensitive: true,
+        resetOnlyForLegacy: true,
+        runtimeProperty: "_spmExecutionState",
+        acceptsEnvelope: () => false,
+        clearRuntimeState: clearSpmRecoveryRuntimeState,
+      },
+    ],
+    clearRuntimeState: (targetNode) => syncSpmRecoveryPrivacyModeProperty(targetNode),
+  };
+}
+
+async function registerSpmPrivacyRecovery() {
+  if (spmPrivacyRecoveryRegistered) return true;
+  const privacy = await sharedPrivacyModule();
+  if (!privacy?.registerPrivacyRecoveryDescriptors) return false;
+  privacy.registerPrivacyRecoveryDescriptors(SPM_PRIVACY_RECOVERY_SOURCE, [
+    spmPrivacyRecoveryDescriptor(),
+    spmLockedPrivacyRecoveryDescriptor(),
+  ]);
+  spmPrivacyRecoveryRegistered = true;
+  return true;
 }
 
 function iconSvg(name) {
@@ -1417,6 +1576,9 @@ function enhanceNode(node) {
   let privacyIncompatible = Boolean(initialUnsupportedEncryptedValue);
   let privacyBusy = false;
   let encryptSequence = 0;
+  syncSpmRecoveryPrivacyModeProperty(node, privacyLocked || state.privacyMode);
+  setSpmRecoveryLockedState(node, privacyLocked);
+  void registerSpmPrivacyRecovery();
   const widgetFrame = createElement("div", "spm-widget-frame");
   const root = createElement("div", "spm-root");
   widgetFrame.appendChild(root);
@@ -1538,30 +1700,7 @@ function enhanceNode(node) {
   }
 
   async function privacyPost(endpoint, payload, { retryOnUnlock = true } = {}) {
-    const privacy = await sharedPrivacyModule();
-    const headers = { "Content-Type": "application/json" };
-    const token = privacy?.getStoredPrivacyToken?.();
-    if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;
-    const response = await fetch(`/helto_spm/privacy/${endpoint}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
-    const text = await response.text();
-    let result = {};
-    try {
-      result = text ? JSON.parse(text) : {};
-    } catch {
-      result = {};
-    }
-    if (!response.ok || result.ok === false) {
-      const error = new Error(result.error || text || `Privacy ${endpoint} failed.`);
-      if (retryOnUnlock && await unlockSharedPrivacyForError(error)) {
-        return await privacyPost(endpoint, payload, { retryOnUnlock: false });
-      }
-      throw error;
-    }
-    return result;
+    return await spmPrivacyPost(endpoint, payload, { retryOnUnlock });
   }
 
   function cloneState(value) {
@@ -1586,6 +1725,7 @@ function enhanceNode(node) {
   }
 
   function exposeExecutionState() {
+    syncSpmRecoveryPrivacyModeProperty(node, privacyLocked || state.privacyMode);
     if (privacyLocked) return;
     node._spmExecutionState = normalizedSnapshot(state);
   }
@@ -1602,10 +1742,29 @@ function enhanceNode(node) {
 
   async function encryptedSnapshotValue(snapshot) {
     const normalized = normalizedSnapshot(snapshot);
-    return await encryptedOrReusePrivacyValue(node, SPM_PRIVACY_FIELD, normalized, async (plaintext) => {
-      const result = await privacyPost("encrypt", { state: plaintext });
+    const privacy = await sharedPrivacyModule();
+    const encrypt = async (plaintext, _context = {}) => {
+      if (privacy?.ensureEncryptedPrivacyValue) {
+        return await encryptRecoveryPlaintextState(plaintext, { retryOnUnlock: false });
+      }
+      const result = await privacyPost("encrypt", { state: normalizeState(plaintext) });
       return result.envelope;
-    });
+    };
+    const envelopeString = privacy?.ensureEncryptedPrivacyValue
+      ? await privacy.ensureEncryptedPrivacyValue({
+          owner: node,
+          fieldName: SPM_PRIVACY_FIELD,
+          value: normalized,
+          canonicalValue: normalized,
+          privacyMode: true,
+          encrypt,
+          schema: SPM_PRIVACY_SCHEMA,
+          defaultValue: serializedDefaultState(),
+          context: { node, fieldName: SPM_PRIVACY_FIELD },
+        })
+      : await encryptedOrReusePrivacyValue(node, SPM_PRIVACY_FIELD, normalized, encrypt);
+    rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, normalized, envelopeString);
+    return envelopeString;
   }
 
   async function encryptAndSetWidget(snapshot, { allowClearOnFailure = false, renderAfter = false } = {}) {
@@ -1622,10 +1781,15 @@ function enhanceNode(node) {
       if (allowClearOnFailure) {
         state.privacyMode = false;
         forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
+        syncSpmRecoveryPrivacyModeProperty(node, false);
         setWidgetValue(node, dataWidget, state);
+        status = `Privacy error: ${error.message}`;
+        return dataWidget.value;
       }
       status = `Privacy error: ${error.message}`;
-      return encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
+      const existingEnvelope = encryptedPrivacyEnvelopeString(dataWidget.value);
+      if (existingEnvelope) return existingEnvelope;
+      throw error;
     } finally {
       if (sequence === encryptSequence) {
         privacyBusy = false;
@@ -1634,19 +1798,22 @@ function enhanceNode(node) {
     }
   }
 
-  async function decryptInitialState() {
+  async function decryptInitialState(encryptedValue = encryptedPrivacyEnvelopeString(dataWidget.value) || initialEncryptedValue) {
     privacyBusy = true;
     try {
-      const result = await privacyPost("decrypt", { payload: parseJsonObject(initialEncryptedValue) });
+      const envelopeString = encryptedPrivacyEnvelopeString(encryptedValue);
+      const result = await privacyPost("decrypt", { payload: parseJsonObject(envelopeString) });
       state = normalizeState(result.state);
       state.privacyMode = true;
-      rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, initialEncryptedValue);
+      rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, envelopeString);
       privacyLocked = false;
       privacyIncompatible = false;
+      setSpmRecoveryLockedState(node, false);
       status = result.warnings?.length ? `Privacy mode unlocked with ${result.warnings.length} warning(s).` : "Privacy mode unlocked.";
       saveWithoutRender();
     } catch (error) {
       privacyLocked = true;
+      setSpmRecoveryLockedState(node, true);
       status = `Privacy error: ${error.message}`;
     } finally {
       privacyBusy = false;
@@ -1659,6 +1826,8 @@ function enhanceNode(node) {
     if (enabled === Boolean(state.privacyMode)) return;
     if (enabled) {
       state.privacyMode = true;
+      syncSpmRecoveryPrivacyModeProperty(node, true);
+      setSpmRecoveryLockedState(node, false);
       status = "Encrypting prompt library...";
       privacyBusy = true;
       renderUi();
@@ -1672,11 +1841,14 @@ function enhanceNode(node) {
     encryptSequence += 1;
     privacyBusy = false;
     state.privacyMode = false;
+    syncSpmRecoveryPrivacyModeProperty(node, false);
+    setSpmRecoveryLockedState(node, false);
     status = "Privacy mode disabled. Workflow data is clear text.";
     save();
   }
 
   function currentSerializedSpmData() {
+    syncSpmRecoveryPrivacyModeProperty(node, privacyLocked || state.privacyMode);
     if (privacyLocked) {
       return encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
     }
@@ -1684,7 +1856,9 @@ function enhanceNode(node) {
       return dataWidget.value;
     }
     const snapshot = normalizedSnapshot(state);
-    return rememberedPrivacyEnvelope(node, SPM_PRIVACY_FIELD, snapshot) || encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value;
+    const envelopeString = rememberedPrivacyEnvelope(node, SPM_PRIVACY_FIELD, snapshot) || encryptedPrivacyEnvelopeString(dataWidget.value);
+    if (envelopeString) return envelopeString;
+    throw new Error("Privacy encryption is required before Smart Prompt Manager can serialize private prompt data.");
   }
 
   function writeSerializedSpmData(info, value) {
@@ -1692,6 +1866,7 @@ function enhanceNode(node) {
   }
 
   function preparePrivacySerialization() {
+    syncSpmRecoveryPrivacyModeProperty(node, privacyLocked || state.privacyMode);
     if (privacyLocked) {
       return Promise.resolve(encryptedPrivacyEnvelopeString(dataWidget.value) || dataWidget.value);
     }
@@ -1700,6 +1875,61 @@ function enhanceNode(node) {
       return Promise.resolve(dataWidget.value);
     }
     return trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+  }
+
+  function privacyRecoveryStatus(result) {
+    if (!result) return "Privacy recovery checked.";
+    if (result.failedCount) return `Privacy recovery failed for ${result.failedCount} item(s).`;
+    if (result.appliedCount) return `Privacy recovery applied ${result.appliedCount} change(s).`;
+    return "Privacy recovery found no changes to apply.";
+  }
+
+  async function reloadAfterPrivacyRecovery(recoveryResult = null) {
+    privacyBusy = false;
+    const currentEnvelope = encryptedPrivacyEnvelopeString(dataWidget.value);
+    const currentUnsupported = currentEnvelope ? "" : unsupportedPrivacyEnvelopeString(dataWidget.value);
+    forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
+    delete node._spmExecutionState;
+
+    if (currentEnvelope) {
+      await decryptInitialState(currentEnvelope);
+      return;
+    }
+    if (currentUnsupported) {
+      state = defaultState();
+      state.privacyMode = true;
+      privacyLocked = true;
+      privacyIncompatible = true;
+      setSpmRecoveryLockedState(node, true);
+      status = privacyRecoveryStatus(recoveryResult);
+      syncSpmRecoveryPrivacyModeProperty(node, true);
+      renderUi();
+      return;
+    }
+
+    state = parseState(dataWidget.value);
+    privacyLocked = false;
+    privacyIncompatible = false;
+    setSpmRecoveryLockedState(node, false);
+    status = privacyRecoveryStatus(recoveryResult);
+    syncSpmRecoveryPrivacyModeProperty(node, state.privacyMode);
+    exposeExecutionState();
+    syncSpmSerializedWidgetValues(node, { spmDataValue: dataWidget.value, dirty: true });
+    renderUi();
+  }
+
+  async function openPrivacyRecoveryDialog() {
+    const registered = await registerSpmPrivacyRecovery();
+    const privacy = await sharedPrivacyModule();
+    if (!registered || !privacy?.showPrivacyRecoveryDialog) {
+      status = "Privacy recovery UI is unavailable. Update helto-privacy to use recovery.";
+      renderUi();
+      return;
+    }
+    syncSpmRecoveryPrivacyProperties(defaultGraph());
+    const dialogResult = await privacy.showPrivacyRecoveryDialog({ mode: "manual", graph: defaultGraph() });
+    syncSpmRecoveryPrivacyProperties(defaultGraph());
+    await reloadAfterPrivacyRecovery(dialogResult?.result || null);
   }
 
   node._spmPreparePrivacySerialization = preparePrivacySerialization;
@@ -1949,6 +2179,7 @@ function enhanceNode(node) {
           privacyBusy = false;
           privacyLocked = false;
           privacyIncompatible = false;
+          setSpmRecoveryLockedState(node, false);
           state = normalizeState(result.state);
           state.privacyMode = true;
           rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, imported.spmData);
@@ -1962,12 +2193,14 @@ function enhanceNode(node) {
           privacyBusy = false;
           privacyLocked = true;
           privacyIncompatible = false;
+          setSpmRecoveryLockedState(node, true);
           forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
           delete node._spmExecutionState;
           state = defaultState();
           state.privacyMode = true;
           setWidgetRawValue(node, dataWidget, imported.spmData);
           syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true });
+          syncSpmRecoveryPrivacyModeProperty(node, true);
           status = `Imported encrypted library, but could not decrypt it with the shared privacy keystore: ${error.message}`;
           renderUi();
         }
@@ -2698,6 +2931,7 @@ function enhanceNode(node) {
         <div class="spm-row-wrap">
           ${privacySwitch({ checked: true, disabled: true })}
           ${privacyIncompatible ? "" : iconButton("check", "Unlock privacy keystore", 'data-action="unlock-private-data"', "spm-btn-primary")}
+          ${iconButton("recovery", "Privacy recovery", 'data-action="privacy-recovery"', "spm-btn-quiet")}
           ${iconButton("delete", "Reset encrypted prompt data", 'data-action="reset-private-data"', "spm-btn-danger")}
           <span class="spm-muted">${escapeHtml(privacyBusy ? "Decrypting..." : status)}</span>
         </div>
@@ -2777,6 +3011,9 @@ function enhanceNode(node) {
         <textarea class="spm-copybox" data-role="json-box" placeholder="Import/export/copy fallback JSON"></textarea>
       </details>
       <details class="spm-section"><summary>Debug / Preview</summary>
+        <div class="spm-row-wrap">
+          ${iconButton("recovery", "Privacy recovery", 'data-action="privacy-recovery"', "spm-btn-quiet")}
+        </div>
         ${warnings.length ? warnings.map((warning) => `<div class="spm-warn">${escapeHtml(warning)}</div>`).join("") : '<div class="spm-muted">No warnings.</div>'}
       </details>
     `;
@@ -2839,6 +3076,10 @@ function enhanceNode(node) {
     }
     const actionButton = event.target.closest?.("[data-action]");
     const action = actionButton?.dataset.action;
+    if (action === "privacy-recovery") {
+      await openPrivacyRecoveryDialog();
+      return;
+    }
     if (action === "unlock-private-data") {
       if (privacyIncompatible) return;
       await decryptInitialState();
@@ -2849,9 +3090,11 @@ function enhanceNode(node) {
       privacyLocked = false;
       privacyIncompatible = false;
       privacyBusy = false;
+      setSpmRecoveryLockedState(node, false);
       forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
       state = defaultState();
       state.privacyMode = false;
+      syncSpmRecoveryPrivacyModeProperty(node, false);
       status = "Encrypted prompt data reset.";
       save();
       return;
@@ -3079,12 +3322,14 @@ function enhanceNode(node) {
 
 scheduleSpmSeedQueuePatch();
 scheduleSpmGraphToPromptPatch();
+void registerSpmPrivacyRecovery();
 
 app.registerExtension({
   name: EXTENSION_NAME,
   setup() {
     scheduleSpmSeedQueuePatch("setup");
     scheduleSpmGraphToPromptPatch("setup");
+    void registerSpmPrivacyRecovery();
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_CLASS) return;
@@ -3095,6 +3340,7 @@ app.registerExtension({
       const result = originalConfigure?.apply(this, arguments);
       installSpmSeedControlPersistence(this);
       syncSpmSerializedWidgetValues(this);
+      syncSpmRecoveryPrivacyModeProperty(this);
       return result;
     };
 
