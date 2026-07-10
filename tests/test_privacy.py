@@ -52,6 +52,8 @@ class PrivacyTests(unittest.TestCase):
         self.assertFalse(status["keyExists"])
         self.assertEqual(status["keyPath"], "")
         self.assertFalse(status["keystoreInitialized"])
+        self.assertNotIn("keystorePath", status)
+        self.assertNotIn("sessionPath", status)
 
     @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography package is required for privacy encryption tests")
     def test_encrypt_requires_initialized_keystore(self):
@@ -136,6 +138,23 @@ class PrivacyTests(unittest.TestCase):
         with self.assertRaises(PrivacyError) as ctx:
             decrypt_state(payload)
         self.assertIn("unsupported legacy privacy schema", str(ctx.exception))
+
+    def test_unknown_encrypted_schema_is_rejected(self):
+        payload = {
+            "version": 2,
+            "schema": "future.smart-prompt-manager",
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "future-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+
+        self.assertFalse(is_encrypted_payload(payload))
+        self.assertTrue(is_unsupported_encrypted_payload(payload))
+        with self.assertRaises(PrivacyError) as ctx:
+            decrypt_state(payload)
+        self.assertIn("unsupported encrypted privacy schema", str(ctx.exception))
 
 
 if __name__ == "__main__":

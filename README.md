@@ -13,6 +13,15 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/helto4real/comfyui-helto-smartprompt comfyui-helto-smartprompt
 ```
 
+Install the node's Python dependencies with the same interpreter that runs ComfyUI:
+
+```bash
+cd ..
+python -m pip install -r custom_nodes/comfyui-helto-smartprompt/requirements.txt
+```
+
+If ComfyUI uses a virtual environment or embedded Python, replace `python` with that interpreter. ComfyUI Manager installations handle the requirements step automatically.
+
 Restart ComfyUI. The node appears under:
 
 ```text
@@ -265,7 +274,7 @@ Library schema:
 
 Malformed JSON is reported in the UI and backend warnings. Merge import avoids ID collisions and keeps existing conflicting variables.
 
-When Privacy mode is enabled, the saved workflow contains an encrypted envelope instead of this clear-text schema. Full library export remains an explicit clear-text export action.
+When Privacy mode is enabled, the saved workflow and full-library export contain an encrypted envelope instead of this clear-text schema. Plaintext library replacement preserves the destination node's current Privacy mode; use the Privacy mode switch and its confirmation if you intend to store the imported library in clear text. Copying a resolved prompt or prompt JSON remains an explicit clear-text clipboard action.
 
 ## Known Limitations
 
@@ -280,8 +289,12 @@ When Privacy mode is enabled, the saved workflow contains an encrypted envelope 
 Run tests from the repository root:
 
 ```bash
+python -m pip install -r requirements.txt
+node --check web/js/smart_prompt_manager.js
 python -m unittest discover
 ```
+
+Use the same Python interpreter that runs the target ComfyUI installation.
 
 Core modules:
 

@@ -86,6 +86,10 @@ class ResolverTests(unittest.TestCase):
         result = resolve_prompt("{{cycle}}", VARIABLES, seed=0, reroll=1, cycle_state={"cycle": 1})
         self.assertEqual(result["resolved_prompt"], "three")
 
+    def test_cycle_wraps_negative_imported_state(self):
+        result = resolve_prompt("{{cycle}}", VARIABLES, seed=0, reroll=0, cycle_state={"cycle": -1})
+        self.assertEqual(result["resolved_prompt"], "three")
+
     def test_variables_used_keeps_order(self):
         self.assertEqual(variables_used("{{b}} {{a}} {{b}} {{bad name}}"), ["b", "a"])
 

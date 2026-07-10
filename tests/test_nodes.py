@@ -118,6 +118,30 @@ class SmartPromptManagerNodeTests(unittest.TestCase):
         self.assertEqual(result[0], "")
         self.assertTrue(any("unsupported legacy privacy schema" in warning for warning in warnings))
 
+    def test_unknown_encrypted_workflow_spm_data_stays_protected(self):
+        envelope = {
+            "version": 2,
+            "schema": "future.smart-prompt-manager",
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "future-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+        token = "spm-cache-v1:" + "e" * 64
+
+        result = SmartPromptManager().resolve(
+            token,
+            seed=1,
+            reroll=0,
+            unique_id="7",
+            extra_pnginfo=self._extra_pnginfo("7", envelope),
+        )
+
+        warnings = json.loads(result[5])["warnings"]
+        self.assertEqual(result[0], "")
+        self.assertTrue(any("unsupported encrypted privacy schema" in warning for warning in warnings))
+
     def test_cache_token_without_workflow_metadata_warns_readably(self):
         token = "spm-cache-v1:" + "c" * 64
         result = SmartPromptManager().resolve(token, seed=1, reroll=0, unique_id="7", extra_pnginfo={})

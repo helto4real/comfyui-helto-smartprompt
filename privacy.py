@@ -34,13 +34,16 @@ def _keystore_required() -> None:
 
 def crypto_status(base_dir: str | os.PathLike[str] | None = None) -> Dict[str, Any]:
     del base_dir
+    keystore_status = _keystore.keystore_status()
     return {
         "available": CRYPTO_AVAILABLE,
         "algorithm": ALGORITHM,
         "keyExists": False,
         "keyPath": "",
         "error": "" if CRYPTO_AVAILABLE else f"Python package 'cryptography' is required: {CRYPTO_IMPORT_ERROR}",
-        **_keystore.keystore_status(),
+        "keystoreAvailable": bool(keystore_status.get("keystoreAvailable")),
+        "keystoreInitialized": bool(keystore_status.get("keystoreInitialized")),
+        "keystoreLocked": bool(keystore_status.get("keystoreLocked")),
     }
 
 
@@ -48,20 +51,29 @@ def is_encrypted_payload(value: Any) -> bool:
     return _codec.is_encrypted_payload(value)
 
 
-def is_unsupported_encrypted_payload(value: Any) -> bool:
+def _payload_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
     if isinstance(value, str):
         try:
             import json
 
             value = json.loads(value)
         except Exception:
-            return False
-    return (
-        isinstance(value, Mapping)
-        and value.get("encrypted") is True
-        and value.get("schema") == LEGACY_ENVELOPE_SCHEMA
-        and value.get("algorithm") == ALGORITHM
-    )
+            return None
+    return value if isinstance(value, Mapping) else None
+
+
+def is_unsupported_encrypted_payload(value: Any) -> bool:
+    payload = _payload_mapping(value)
+    return payload is not None and payload.get("encrypted") is True and not is_encrypted_payload(payload)
+
+
+def unsupported_encrypted_payload_message(value: Any) -> str:
+    payload = _payload_mapping(value)
+    if payload is not None and payload.get("schema") == LEGACY_ENVELOPE_SCHEMA:
+        return "Encrypted Smart Prompt Manager data uses an unsupported legacy privacy schema."
+    return "Encrypted Smart Prompt Manager data uses an unsupported encrypted privacy schema or algorithm."
 
 
 def encrypt_state(state: Mapping[str, Any], base_dir: str | os.PathLike[str] | None = None) -> Dict[str, Any]:
@@ -76,9 +88,7 @@ def encrypt_state(state: Mapping[str, Any], base_dir: str | os.PathLike[str] | N
 def decrypt_state(payload: Any, base_dir: str | os.PathLike[str] | None = None) -> Tuple[Dict[str, Any], list[str]]:
     del base_dir
     if is_unsupported_encrypted_payload(payload):
-        raise PrivacyError(
-            "Encrypted Smart Prompt Manager data uses an unsupported legacy privacy schema."
-        )
+        raise PrivacyError(unsupported_encrypted_payload_message(payload))
     _keystore_required()
     loaded = _codec.decrypt_state(payload)
     state, warnings = normalize_state(loaded if isinstance(loaded, Mapping) else {})

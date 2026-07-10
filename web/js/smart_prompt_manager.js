@@ -428,7 +428,7 @@ function spmPrivacyRecoveryDescriptor() {
         clearRuntimeState: clearSpmRecoveryRuntimeState,
       },
     ],
-    reencrypt: async (plaintext) => encryptRecoveryPlaintextState(plaintext, { retryOnUnlock: false }),
+    reencrypt: (plaintext) => encryptRecoveryPlaintextState(plaintext, { retryOnUnlock: false }),
     clearRuntimeState: (targetNode) => syncSpmRecoveryPrivacyModeProperty(targetNode),
   };
 }
@@ -623,12 +623,18 @@ function isEncryptedStateValue(value) {
 }
 
 function isUnsupportedEncryptedStateValue(value) {
-  const parsed = parseJsonObject(value);
-  return parsed.encrypted === true && parsed.schema === SPM_LEGACY_PRIVACY_SCHEMA;
+  return isAnyEncryptedStateValue(value) && !isEncryptedStateValue(value);
 }
 
 function isAnyEncryptedStateValue(value) {
-  return isEncryptedStateValue(value) || isUnsupportedEncryptedStateValue(value);
+  return parseJsonObject(value).encrypted === true;
+}
+
+function unsupportedPrivacyEnvelopeDescription(value) {
+  const parsed = parseJsonObject(value);
+  return parsed.schema === SPM_LEGACY_PRIVACY_SCHEMA
+    ? "unsupported legacy privacy schema"
+    : "unsupported encrypted privacy schema or algorithm";
 }
 
 function clonePlain(value) {
@@ -666,13 +672,8 @@ export function encryptedPrivacyEnvelopeString(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
-function isUnsupportedPrivacyEnvelopeValue(value) {
-  const parsed = parseJsonObject(value);
-  return parsed.encrypted === true && parsed.schema === SPM_LEGACY_PRIVACY_SCHEMA;
-}
-
 function unsupportedPrivacyEnvelopeString(value) {
-  if (!isUnsupportedPrivacyEnvelopeValue(value)) return "";
+  if (!isUnsupportedEncryptedStateValue(value)) return "";
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
@@ -870,7 +871,7 @@ function isSpmExportPackage(value) {
 }
 
 function isLibraryImportObject(value) {
-  return isSpmExportPackage(value) || isPrivacyEnvelopeValue(value) || isUnsupportedPrivacyEnvelopeValue(value) || Array.isArray(value?.prompts);
+  return isSpmExportPackage(value) || isPrivacyEnvelopeValue(value) || isUnsupportedEncryptedStateValue(value) || Array.isArray(value?.prompts);
 }
 
 function isLibraryImportText(value) {
@@ -885,8 +886,8 @@ function isLibraryImportText(value) {
 export function parseSpmImport(raw) {
   const parsed = JSON.parse(String(raw ?? ""));
   if (isSpmExportPackage(parsed)) {
-    if (isUnsupportedPrivacyEnvelopeValue(parsed.spm_data)) {
-      throw new Error("Encrypted Smart Prompt Manager export uses an unsupported legacy privacy schema.");
+    if (isUnsupportedEncryptedStateValue(parsed.spm_data)) {
+      throw new Error(`Encrypted Smart Prompt Manager export uses an ${unsupportedPrivacyEnvelopeDescription(parsed.spm_data)}.`);
     }
     const envelopeString = encryptedPrivacyEnvelopeString(parsed.spm_data);
     const encrypted = Boolean(parsed.encrypted) || Boolean(envelopeString);
@@ -903,8 +904,8 @@ export function parseSpmImport(raw) {
       state: parsePlainLibraryState(parsed.spm_data),
     };
   }
-  if (isUnsupportedPrivacyEnvelopeValue(parsed)) {
-    throw new Error("Encrypted Smart Prompt Manager import uses an unsupported legacy privacy schema.");
+  if (isUnsupportedEncryptedStateValue(parsed)) {
+    throw new Error(`Encrypted Smart Prompt Manager import uses an ${unsupportedPrivacyEnvelopeDescription(parsed)}.`);
   }
   const envelopeString = encryptedPrivacyEnvelopeString(parsed);
   if (envelopeString) return { encrypted: true, spmData: envelopeString, state: null };
@@ -1044,7 +1045,9 @@ function selectVariableValue(name, definition, seed, reroll, cycleState, warning
   if (!candidates.length) return "";
   if (mode === "cycle") {
     const base = Number.parseInt(cycleState?.[name] || 0, 10) || 0;
-    return candidates[(base + (Number.parseInt(reroll, 10) || 0)) % candidates.length];
+    const offset = base + (Number.parseInt(reroll, 10) || 0);
+    const index = ((offset % candidates.length) + candidates.length) % candidates.length;
+    return candidates[index];
   }
   const index = stableHash(`${Number.parseInt(seed, 10) || 0}:${Number.parseInt(reroll, 10) || 0}:${name}`) % candidates.length;
   return candidates[index];
@@ -1153,10 +1156,6 @@ function isSeedControlWidgetCandidate(widget, seedWidget = null) {
     widget?.name === `${seedName}_control_after_generate` ||
     (Array.isArray(values) && SEED_CONTROL_MODES.every((value) => values.includes(value)))
   );
-}
-
-function isSeedControlWidget(widget, seedWidget = null) {
-  return isSeedControlWidgetCandidate(widget, seedWidget) && Boolean(validSeedControlMode(widget.value));
 }
 
 function seedControlWidget(node, seedWidget = widgetByName(node, "seed")) {
@@ -1378,7 +1377,7 @@ function restoreQueuedSpmSeeds(queuedSeeds) {
 }
 // ---- End seed queue helpers ----
 
-function installSpmSeedQueuePatch(source = "install") {
+function installSpmSeedQueuePatch(_source = "install") {
   if (typeof app.queuePrompt !== "function") {
     return false;
   }
@@ -1438,14 +1437,27 @@ function liveSpmExecutionState(node, outputNode = null) {
   return parseState(rawValue);
 }
 
+function spmExecutionCacheIdentity(state) {
+  const normalized = normalizeState(state);
+  return {
+    selectedPromptId: normalized.selectedPromptId,
+    selectedFolderId: normalized.selectedFolderId,
+    folderIds: normalized.folders.map((folder) => folder.id),
+    prompts: normalized.prompts.map((prompt) => ({
+      id: prompt.id,
+      title: prompt.title,
+      text: prompt.text,
+    })),
+    variables: normalized.variables,
+    cycleState: normalized.cycleState,
+  };
+}
+
 async function spmCacheTokenForNode(node, outputNode = null) {
   const state = liveSpmExecutionState(node, outputNode);
   let tokenSource = "";
   if (state) {
-    const seed = Number.parseInt(outputNode?.inputs?.seed ?? widgetByName(node, "seed")?.value ?? 0, 10) || 0;
-    const reroll = Number.parseInt(outputNode?.inputs?.reroll ?? widgetByName(node, "reroll")?.value ?? 0, 10) || 0;
-    const prompt = selectedPrompt(state);
-    tokenSource = resolvePrompt(prompt?.text || "", state.variables, seed, reroll, state.cycleState).resolved_prompt;
+    tokenSource = canonicalPrivacyPlaintext(spmExecutionCacheIdentity(state));
   } else {
     const encryptedValue = widgetByName(node, SPM_PRIVACY_FIELD)?.value ?? outputNode?.inputs?.spm_data;
     if (!encryptedValue) return null;
@@ -1484,11 +1496,11 @@ async function waitForSpmPrivacySaves(graph = defaultGraph()) {
       .filter(Boolean),
   ];
   if (pending.length) {
-    await Promise.all(pending.map((promise) => Promise.resolve(promise).catch(() => {})));
+    await Promise.all(pending.map((promise) => Promise.resolve(promise)));
   }
 }
 
-function installSpmGraphToPromptPatch(source = "install") {
+function installSpmGraphToPromptPatch(_source = "install") {
   if (typeof app.graphToPrompt !== "function") {
     return false;
   }
@@ -1715,7 +1727,6 @@ function injectStyles() {
 
     /* ---- Autocomplete / tooltip (pop surfaces) ---- */
     .spm-autocomplete{position:absolute;z-index:10000;background:var(--helto-surface);border:1px solid var(--helto-border-strong);border-radius:var(--helto-radius);box-shadow:var(--helto-shadow-pop);max-height:150px;overflow:auto;min-width:210px;padding:5px;animation:spm-pop .15s var(--helto-ease-spring)}
-    .spm-autocomplete-main{left:10px;top:258px}
     .spm-autocomplete-dialog{display:none;left:8px;top:250px}
     .spm-suggestion{display:flex;gap:8px;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:var(--helto-radius-sm);cursor:pointer;color:var(--helto-text)}
     .spm-suggestion:hover{background:var(--helto-surface-hover);color:var(--helto-text)}
@@ -1775,7 +1786,7 @@ function enhanceNode(node) {
   const initialUnsupportedEncryptedValue = initialEncryptedValue ? "" : unsupportedPrivacyEnvelopeString(dataWidget.value);
   let state = initialEncryptedValue || initialUnsupportedEncryptedValue ? defaultState() : parseState(dataWidget.value);
   let status = initialUnsupportedEncryptedValue
-    ? "This workflow uses an older encrypted Smart Prompt Manager payload that this version cannot decrypt."
+    ? `This workflow uses an ${unsupportedPrivacyEnvelopeDescription(initialUnsupportedEncryptedValue)} that this version cannot decrypt.`
     : initialEncryptedValue ? "Decrypting private prompt library..." : "";
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
   let tooltip = null;
@@ -1811,10 +1822,6 @@ function enhanceNode(node) {
     lastThemeKey = themeKey;
     applyNodeTheme(root);
     document.querySelectorAll(".spm-modal-backdrop").forEach((element) => applyNodeTheme(element));
-  }
-
-  function panelWidth() {
-    return Math.max(PANEL_MIN_WIDTH, Math.floor((node.size?.[0] || PANEL_DEFAULT_WIDTH + PANEL_HORIZONTAL_GUTTER * 2) - PANEL_HORIZONTAL_GUTTER * 2));
   }
 
   function panelHeight() {
@@ -1996,8 +2003,6 @@ function enhanceNode(node) {
         return dataWidget.value;
       }
       status = `Privacy error: ${error.message}`;
-      const existingEnvelope = encryptedPrivacyEnvelopeString(dataWidget.value);
-      if (existingEnvelope) return existingEnvelope;
       throw error;
     } finally {
       if (sequence === encryptSequence) {
@@ -2161,7 +2166,8 @@ function enhanceNode(node) {
     state = normalizeState(state);
     exposeExecutionState();
     if (state.privacyMode) {
-      void trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+      const pending = trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+      void pending.catch(() => {});
     } else {
       setWidgetValue(node, dataWidget, state);
     }
@@ -2198,7 +2204,8 @@ function enhanceNode(node) {
   function saveWithoutRender() {
     exposeExecutionState();
     if (state.privacyMode) {
-      void trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+      const pending = trackPrivacySave(encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false }));
+      void pending.catch(() => {});
     } else {
       setWidgetValue(node, dataWidget, state);
     }
@@ -2248,7 +2255,7 @@ function enhanceNode(node) {
     });
   }
 
-  function renderPreview(text, resolution) {
+  function renderPreview(text) {
     let index = 0;
     TOKEN_RE.lastIndex = 0;
     let html = "";
@@ -2379,6 +2386,7 @@ function enhanceNode(node) {
   }
 
   async function importLibraryText(raw, replace) {
+    const destinationPrivacyMode = Boolean(state.privacyMode);
     const imported = parseSpmImport(raw);
     if (imported.encrypted) {
       if (replace) {
@@ -2425,6 +2433,7 @@ function enhanceNode(node) {
     if (replace) {
       forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
       state = imported.state;
+      state.privacyMode = destinationPrivacyMode;
       status = "Imported library.";
       save();
       return;
@@ -2510,19 +2519,6 @@ function enhanceNode(node) {
     save();
   }
 
-  function renderAutocomplete() {
-    if (!autocomplete.open) return "";
-    return `<div class="spm-autocomplete spm-autocomplete-main">
-      ${autocomplete.items
-        .map((name, index) => {
-          const definition = state.variables[name];
-          const extra = `${definition.mode} · ${normalizeValues(definition.values).length} values${definition.fixedValue ? ` · ${definition.fixedValue}` : ""}`;
-          return `<div class="spm-suggestion ${index === autocomplete.active ? "is-active" : ""}" data-suggest="${escapeHtml(name)}"><span class="spm-suggestion-name">${escapeHtml(name)}</span><span class="spm-mini">${escapeHtml(extra)}</span></div>`;
-        })
-        .join("")}
-    </div>`;
-  }
-
   function renderAutocompleteInto(popup) {
     if (!autocomplete.open || !autocomplete.items.length) {
       popup.innerHTML = "";
@@ -2602,7 +2598,7 @@ function enhanceNode(node) {
 
     const updatePreview = () => {
       const nextResolution = currentResolution(prompt);
-      modal.querySelector("[data-dialog-highlight]").innerHTML = renderPreview(prompt.text || "", nextResolution);
+      modal.querySelector("[data-dialog-highlight]").innerHTML = renderPreview(prompt.text || "");
       modal.querySelector("[data-dialog-resolved]").textContent = nextResolution.resolved_prompt;
     };
 
@@ -2676,7 +2672,7 @@ function enhanceNode(node) {
               ${iconButton("json", "Copy prompt JSON", 'data-dialog-action="copy-prompt-json"')}
             </div>
             <div class="spm-mini">Highlighted preview</div>
-            <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "", resolution)}</div>
+            <div class="spm-preview" data-dialog-highlight>${renderPreview(prompt.text || "")}</div>
             <div class="spm-mini">Resolved preview</div>
             <div class="spm-preview" data-dialog-resolved>${escapeHtml(resolution.resolved_prompt)}</div>
           </div>
@@ -2817,6 +2813,8 @@ function enhanceNode(node) {
         close(false);
         return;
       }
+      const editor = modal.querySelector(".spm-dialog-editor");
+      const popup = modal.querySelector("[data-dialog-autocomplete]");
       if (event.target !== editor) return;
       if (event.key === KEYS.close && autocomplete.open) {
         autocomplete.open = false;
@@ -3084,7 +3082,8 @@ function enhanceNode(node) {
         renderFolders();
         return;
       }
-      const action = event.target.closest?.("[data-dialog-action]")?.dataset.dialogAction;
+      const actionButton = event.target.closest?.("[data-dialog-action]");
+      const action = actionButton?.dataset.dialogAction;
       if (action === "save-close") close();
       if (action === "add-folder") {
         const folder = { id: makeId("folder"), name: "", hidden: false };
@@ -3094,7 +3093,7 @@ function enhanceNode(node) {
         renderFolders(folder.id);
       }
       if (action === "delete-folder") {
-        const folderId = event.target.dataset.folder;
+        const folderId = actionButton.dataset.folder;
         const folder = state.folders.find((item) => item.id === folderId);
         if (!folder || !confirm(`Delete folder "${folder.name}"? Prompts will move to Unsorted.`)) return;
         state.prompts.forEach((prompt) => {
@@ -3131,7 +3130,7 @@ function enhanceNode(node) {
   function renderUi() {
     if (privacyLocked) {
       const lockedWarning = privacyIncompatible
-        ? "This workflow contains encrypted Smart Prompt Manager data written with the old privacy schema. This version does not decrypt legacy encrypted payloads."
+        ? `This workflow contains Smart Prompt Manager data using an ${unsupportedPrivacyEnvelopeDescription(dataWidget.value)}. This version cannot decrypt it.`
         : "This workflow contains encrypted Smart Prompt Manager data. Unlock the shared Helto privacy keystore to decrypt it.";
       const lockedHint = privacyIncompatible
         ? "Resetting discards the encrypted prompt library for this node. Plaintext workflows are still supported."
@@ -3206,7 +3205,7 @@ function enhanceNode(node) {
           ${iconButton("json", "Copy prompt JSON", 'data-action="copy-prompt-json"')}
         </div>
         <div class="spm-mini">Highlighted preview</div>
-        <div class="spm-preview">${revealSelectedPreview ? renderPreview(prompt?.text || "", resolution) : previewPlaceholder}</div>
+        <div class="spm-preview">${revealSelectedPreview ? renderPreview(prompt?.text || "") : previewPlaceholder}</div>
         <div class="spm-mini">Resolved preview</div>
         <div class="spm-preview">${revealSelectedPreview ? escapeHtml(resolution.resolved_prompt) : previewPlaceholder}</div>
       </details>
@@ -3485,7 +3484,7 @@ function enhanceNode(node) {
   stopComfyShortcuts(root);
 
   const originalOnResize = node.onResize;
-  node.onResize = function onResize(size) {
+  node.onResize = function onResize(_size) {
     const result = originalOnResize?.apply(this, arguments);
     syncPanelSize();
     return result;
@@ -3500,7 +3499,7 @@ function enhanceNode(node) {
   };
 
   const originalOnDrawForeground = node.onDrawForeground;
-  node.onDrawForeground = function onDrawForeground(ctx) {
+  node.onDrawForeground = function onDrawForeground(_ctx) {
     const result = originalOnDrawForeground?.apply(this, arguments);
     refreshNodeTheme();
     syncPanelSize({ dirty: false });
@@ -3546,7 +3545,7 @@ app.registerExtension({
       }
     });
   },
-  async beforeRegisterNodeDef(nodeType, nodeData) {
+  beforeRegisterNodeDef(nodeType, nodeData) {
     if (!isSmartPromptManagerNodeData(nodeData)) return;
     const originalConfigure = nodeType.prototype.configure;
     nodeType.prototype.configure = function configure(data) {

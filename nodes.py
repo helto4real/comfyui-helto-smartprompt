@@ -17,6 +17,7 @@ try:
         encrypt_state,
         is_encrypted_payload,
         is_unsupported_encrypted_payload,
+        unsupported_encrypted_payload_message,
     )
     from .validation import validate_state
 except ImportError:  # Allows running tests from the repository root.
@@ -29,6 +30,7 @@ except ImportError:  # Allows running tests from the repository root.
         encrypt_state,
         is_encrypted_payload,
         is_unsupported_encrypted_payload,
+        unsupported_encrypted_payload_message,
     )
     from validation import validate_state
 
@@ -152,7 +154,7 @@ def parse_spm_data(value: Any, unique_id: Any = None, extra_pnginfo: Any = None)
     if is_unsupported_encrypted_payload(value):
         state = _empty_state()
         state["privacyMode"] = True
-        return state, ["Encrypted Smart Prompt Manager data uses an unsupported legacy privacy schema."]
+        return state, [unsupported_encrypted_payload_message(value)]
     return parse_state(value)
 
 
