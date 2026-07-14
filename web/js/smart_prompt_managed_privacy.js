@@ -1,4 +1,7 @@
 import { app } from "../../scripts/app.js";
+import {
+  installPrivacyConnectionSerializationGate,
+} from "/helto_privacy/ui/privacy_snapshot.js";
 
 import {
   SMART_PROMPT_MODE_BROWSER_ADAPTER_ID,
@@ -10,6 +13,8 @@ import { createSmartPromptPrivacyCoordinator } from "./smart_prompt_privacy_coor
 
 export const SMART_PROMPT_PROFILE_ID = "helto.smart-prompt-manager";
 export const SMART_PROMPT_PROFILE_FINGERPRINT = "5a352fd3fb086cd3418039368457e7a2fbd8b4ae81aa0deae6151d8bcbd22352";
+
+installPrivacyConnectionSerializationGate(app).coalesce();
 
 const MODE_RESOURCE_ID = "prompt-library-mode";
 const WORKFLOW_RESOURCE_ID = "prompt-library-workflow";

@@ -388,6 +388,12 @@ assert.equal(selected, "three");
         self.assertIn('fetch("/helto_privacy/status", { cache: "no-store" })', managed)
         self.assertIn("runtime.connectPrivacyPack({", managed)
         self.assertIn("profileFingerprint: SMART_PROMPT_PROFILE_FINGERPRINT", managed)
+        self.assertIn('from "/helto_privacy/ui/privacy_snapshot.js";', managed)
+        self.assertIn("installPrivacyConnectionSerializationGate(app).coalesce();", managed)
+        self.assertLess(
+            managed.index("installPrivacyConnectionSerializationGate(app).coalesce();"),
+            managed.index("async function connect()"),
+        )
         self.assertIn("writeWorkflowProjection", source)
         self.assertIn("coordinator.flushEditor(node)", source)
         for retired in (
