@@ -47,10 +47,10 @@ class SmartPromptManagerFrontendTests(unittest.TestCase):
         self.assertIn("writeSpmSeedValue(node, seed)", source)
         self.assertIn("suspendSeedControlCallbacks(controlWidget)", source)
         self.assertIn("restoreQueuedSpmSeeds(queuedSeeds)", source)
-        self.assertIn("app.queuePrompt = wrappedQueuePrompt", source)
-        self.assertIn('scheduleSpmSeedQueuePatch("setup")', source)
-        self.assertIn("spmQueuePromptDepth += 1;", source)
-        self.assertIn("spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);", source)
+        self.assertIn("function installSpmSeedQueueLifecycle(node)", source)
+        self.assertIn("target.beforeQueued = function", source)
+        self.assertIn("target.afterQueued = function", source)
+        self.assertNotIn("app.queuePrompt = wrappedQueuePrompt", source)
 
     def test_seed_queue_helpers_only_randomize_explicit_randomize_mode(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"

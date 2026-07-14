@@ -17,9 +17,9 @@ const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
 const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
 const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
 const SPM_EXPORT_VERSION = 1;
-const SPM_SEED_QUEUE_WRAPPER_KEY = "__smartPromptManagerSeedQueuePromptWrapper";
-const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallScheduled";
-const SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT = 80;
+const SPM_SEED_QUEUE_LIFECYCLE_KEY = "__smartPromptManagerSeedQueueLifecycle";
+const SPM_SEED_QUEUE_ACTIVE_KEY = "__smartPromptManagerActiveQueuedSeed";
+const SPM_SEED_QUEUE_MAX_AGE_MS = 10000;
 const SPM_WIDGET_THEME_BRIDGE_KEY = "__spmHeltoLiteGraphWidgetThemeBridgeInstalled";
 const SPM_WIDGET_THEME_FALLBACK_KEY = "__spmHeltoLiteGraphWidgetThemeFallbackInstalled";
 const SPM_WIDGET_THEME_SNAPSHOT_KEY = "__spmHeltoLiteGraphWidgetThemeSnapshot";
@@ -28,7 +28,6 @@ const VIRTUAL_FOLDERS = [
   { id: "unsorted", name: "Unsorted" },
   { id: "favorites", name: "Favorites" },
 ];
-let spmQueuePromptDepth = 0;
 const KEYS = {
   next: "n",
   previous: "p",
@@ -1106,49 +1105,43 @@ function restoreQueuedSpmSeeds(queuedSeeds) {
 }
 // ---- End seed queue helpers ----
 
-function installSpmSeedQueuePatch(_source = "install") {
-  if (typeof app.queuePrompt !== "function") {
-    return false;
-  }
-  if (app.queuePrompt[SPM_SEED_QUEUE_WRAPPER_KEY]) {
-    return true;
-  }
+function installSpmSeedQueueLifecycle(node) {
+  if (!isSmartPromptManagerNode(node)) return false;
+  const seedWidget = widgetByName(node, "seed");
+  const controlWidget = seedControlWidget(node, seedWidget);
+  const target = controlWidget;
+  if (!seedWidget || !target || target[SPM_SEED_QUEUE_LIFECYCLE_KEY]) return Boolean(target);
 
-  const originalQueuePrompt = app.queuePrompt;
-  const wrappedQueuePrompt = async function (...args) {
-    const queuedSeeds = randomizeSpmSeedsBeforeQueue();
-    spmQueuePromptDepth += 1;
-    try {
-      return await originalQueuePrompt.apply(this, args);
-    } finally {
-      spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);
-      restoreQueuedSpmSeeds(queuedSeeds);
+  const originalBeforeQueued = target.beforeQueued;
+  const originalAfterQueued = target.afterQueued;
+  target.beforeQueued = function (...args) {
+    syncSpmSerializedWidgetValues(node);
+    if (liveSeedControlMode(node) !== "randomize") {
+      delete node[SPM_SEED_QUEUE_ACTIVE_KEY];
+      clearQueuedSeedUnlessRandomize(node);
+      return originalBeforeQueued?.apply(this, args);
     }
+    const seed = randomSeed();
+    if (!writeSpmSeedValue(node, seed)) {
+      return originalBeforeQueued?.apply(this, args);
+    }
+    node._spmQueuedSeed = { seed, at: Date.now() };
+    node[SPM_SEED_QUEUE_ACTIVE_KEY] = { seed, at: Date.now() };
+    return undefined;
   };
-  Object.defineProperty(wrappedQueuePrompt, SPM_SEED_QUEUE_WRAPPER_KEY, {
-    value: true,
-    configurable: true,
-  });
-  app.queuePrompt = wrappedQueuePrompt;
-  return true;
-}
-
-function scheduleSpmSeedQueuePatch(source = "top-level") {
-  if (globalThis[SPM_SEED_QUEUE_INSTALL_KEY]) {
-    installSpmSeedQueuePatch(`${source}:resync`);
-    return;
-  }
-  globalThis[SPM_SEED_QUEUE_INSTALL_KEY] = true;
-
-  let attempts = 0;
-  function attempt() {
-    attempts += 1;
-    installSpmSeedQueuePatch(`${source}:${attempts}`);
-    if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
-      setTimeout(attempt, 250);
+  target.afterQueued = function (...args) {
+    const queued = node[SPM_SEED_QUEUE_ACTIVE_KEY];
+    delete node[SPM_SEED_QUEUE_ACTIVE_KEY];
+    if (!queued || Date.now() - queued.at > SPM_SEED_QUEUE_MAX_AGE_MS) {
+      return originalAfterQueued?.apply(this, args);
     }
-  }
-  attempt();
+    if (Number(seedWidget?.value) !== Number(queued.seed)) {
+      writeSpmSeedValue(node, queued.seed);
+    }
+    return undefined;
+  };
+  Object.defineProperty(target, SPM_SEED_QUEUE_LIFECYCLE_KEY, { value: true });
+  return true;
 }
 
 function hideWidget(widget) {
@@ -1382,6 +1375,7 @@ function injectStyles() {
 function enhanceNode(node) {
   injectStyles();
   applySpmNodeTheme(node);
+  installSpmSeedQueueLifecycle(node);
   const dataWidget = node.widgets?.find((widget) => widget.name === SPM_PRIVACY_FIELD);
   if (!dataWidget || node.__spmEnhanced) return;
   node.__spmEnhanced = true;
@@ -2935,12 +2929,9 @@ function enhanceNode(node) {
   renderUi();
 }
 
-scheduleSpmSeedQueuePatch();
-
 app.registerExtension({
   name: EXTENSION_NAME,
   setup() {
-    scheduleSpmSeedQueuePatch("setup");
     installSpmWidgetThemeBridge();
     requestAnimationFrame(() => {
       for (const node of graphNodes()) {
