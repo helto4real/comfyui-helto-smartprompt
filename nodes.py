@@ -4,34 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
 from typing import Any
 
 try:
+    from .managed_execution import (
+        consume_smart_prompt_subject_mode,
+        dispatch_smart_prompt_managed_execution,
+        smart_prompt_subject_requires_private_execution,
+    )
     from .resolver import needed_variable_definitions, resolve_prompt
     from .schema import default_state, parse_state, selected_prompt, state_to_json
-    from .privacy import (
-        PrivacyError,
-        crypto_status,
-        decrypt_state,
-        encrypt_state,
-        is_encrypted_payload,
-        is_unsupported_encrypted_payload,
-        unsupported_encrypted_payload_message,
-    )
     from .validation import validate_state
 except ImportError:  # Allows running tests from the repository root.
+    from managed_execution import (
+        consume_smart_prompt_subject_mode,
+        dispatch_smart_prompt_managed_execution,
+        smart_prompt_subject_requires_private_execution,
+    )
     from resolver import needed_variable_definitions, resolve_prompt
     from schema import default_state, parse_state, selected_prompt, state_to_json
-    from privacy import (
-        PrivacyError,
-        crypto_status,
-        decrypt_state,
-        encrypt_state,
-        is_encrypted_payload,
-        is_unsupported_encrypted_payload,
-        unsupported_encrypted_payload_message,
-    )
     from validation import validate_state
 
 
@@ -39,162 +30,15 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-CACHE_TOKEN_PREFIX = "spm-cache-v1:"
-
-
-def _empty_state() -> dict[str, Any]:
-    state = default_state()
-    state["prompts"] = []
-    state["folders"] = []
-    state["variables"] = {}
-    state["selectedPromptId"] = ""
-    state["selectedFolderId"] = "all"
-    return state
-
-
-def is_cache_token(value: Any) -> bool:
-    return isinstance(value, str) and value.startswith(CACHE_TOKEN_PREFIX)
-
-
-def _as_mapping(value: Any) -> Mapping[str, Any] | None:
-    if isinstance(value, Mapping):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            loaded = json.loads(value)
-        except Exception:
-            return None
-        if isinstance(loaded, Mapping):
-            return loaded
-    return None
-
-
-def _looks_like_spm_payload(value: Any) -> bool:
-    if is_cache_token(value) or is_encrypted_payload(value) or is_unsupported_encrypted_payload(value):
-        return is_encrypted_payload(value) or is_unsupported_encrypted_payload(value)
-    payload = _as_mapping(value)
-    if payload is None:
-        return False
-    return any(key in payload for key in ("prompts", "variables", "selectedPromptId", "folders", "privacyMode"))
-
-
-def _workflow_from_extra(extra_pnginfo: Any) -> Mapping[str, Any] | None:
-    if not isinstance(extra_pnginfo, Mapping):
-        return None
-    workflow = extra_pnginfo.get("workflow")
-    if isinstance(workflow, Mapping):
-        return workflow
-    if isinstance(workflow, str) and workflow.strip():
-        try:
-            loaded = json.loads(workflow)
-        except Exception:
-            return None
-        if isinstance(loaded, Mapping):
-            return loaded
-    return None
-
-
-def _workflow_widget_values(node: Mapping[str, Any]) -> list[Any]:
-    widgets = node.get("widgets_values", [])
-    if isinstance(widgets, Mapping):
-        values: list[Any] = []
-        for key in ("spm_data", "0"):
-            if key in widgets:
-                values.append(widgets[key])
-        values.extend(widgets.values())
-        return values
-    if isinstance(widgets, Sequence) and not isinstance(widgets, (str, bytes, bytearray)):
-        return list(widgets)
-    return []
-
-
-def _spm_data_from_workflow(unique_id: Any, extra_pnginfo: Any) -> tuple[Any | None, list[str]]:
-    if unique_id is None or str(unique_id) == "":
-        return None, ["Smart Prompt Manager cache token could not be resolved because ComfyUI did not provide the node id."]
-
-    workflow = _workflow_from_extra(extra_pnginfo)
-    if workflow is None:
-        return None, ["Smart Prompt Manager cache token could not be resolved because workflow metadata is missing."]
-
-    nodes = workflow.get("nodes", [])
-    if not isinstance(nodes, Sequence) or isinstance(nodes, (str, bytes, bytearray)):
-        return None, ["Smart Prompt Manager cache token could not be resolved because workflow metadata has no node list."]
-
-    matching_node: Mapping[str, Any] | None = None
-    for node in nodes:
-        if isinstance(node, Mapping) and str(node.get("id")) == str(unique_id):
-            matching_node = node
-            break
-
-    if matching_node is None:
-        return None, [f"Smart Prompt Manager cache token could not find workflow node '{unique_id}'."]
-
-    for candidate in _workflow_widget_values(matching_node):
-        if _looks_like_spm_payload(candidate):
-            return candidate, []
-
-    return None, [f"Smart Prompt Manager cache token could not find saved prompt data for workflow node '{unique_id}'."]
-
-
-def parse_spm_data(value: Any, unique_id: Any = None, extra_pnginfo: Any = None):
-    if is_cache_token(value):
-        resolved_value, warnings = _spm_data_from_workflow(unique_id, extra_pnginfo)
-        if resolved_value is None:
-            return _empty_state(), warnings
-        state, parse_warnings = parse_spm_data(resolved_value)
-        return state, warnings + parse_warnings
-
-    if is_encrypted_payload(value):
-        try:
-            return decrypt_state(value)
-        except PrivacyError as exc:
-            state = _empty_state()
-            state["privacyMode"] = True
-            return state, [str(exc)]
-    if is_unsupported_encrypted_payload(value):
-        state = _empty_state()
-        state["privacyMode"] = True
-        return state, [unsupported_encrypted_payload_message(value)]
-    return parse_state(value)
-
-
-try:
-    from aiohttp import web
-    from helto_privacy import aiohttp_check_privacy_token
-    from server import PromptServer
-
-    routes = PromptServer.instance.routes
-
-    @routes.get("/helto_spm/privacy/status")
-    async def helto_spm_privacy_status(_request):
-        return web.json_response({"ok": True, "status": crypto_status()})
-
-    @routes.post("/helto_spm/privacy/encrypt")
-    async def helto_spm_privacy_encrypt(request):
-        denied = aiohttp_check_privacy_token(request)
-        if denied is not None:
-            return denied
-        try:
-            payload = await request.json()
-            envelope = encrypt_state(payload.get("state", {}))
-            return web.json_response({"ok": True, "envelope": envelope, "status": crypto_status()})
-        except Exception as exc:  # noqa: BLE001 - API should return a readable UI error.
-            return web.json_response({"ok": False, "error": str(exc), "status": crypto_status()}, status=400)
-
-    @routes.post("/helto_spm/privacy/decrypt")
-    async def helto_spm_privacy_decrypt(request):
-        denied = aiohttp_check_privacy_token(request)
-        if denied is not None:
-            return denied
-        try:
-            payload = await request.json()
-            state, warnings = decrypt_state(payload.get("payload", {}))
-            return web.json_response({"ok": True, "state": state, "warnings": warnings, "status": crypto_status()})
-        except Exception as exc:  # noqa: BLE001 - API should return a readable UI error.
-            return web.json_response({"ok": False, "error": str(exc), "status": crypto_status()}, status=400)
-
-except Exception:
-    pass
+def _reject_protected_public_input(value: object) -> None:
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return
+    if isinstance(payload, dict) and (
+        payload.get("encrypted") is True or "ciphertext" in payload
+    ):
+        raise ValueError("PRIVACY_EXECUTION_REFERENCE_INVALID")
 
 
 class SmartPromptManager:
@@ -228,16 +72,79 @@ class SmartPromptManager:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": "fixed"}),
                 "reroll": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFF}),
             },
-            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
+            "optional": {
+                "privacy_mode_reference": (
+                    "STRING",
+                    {"default": "", "socketless": True, "hidden": True},
+                ),
+                "private_execution": (
+                    "STRING",
+                    {"default": "", "socketless": True, "hidden": True},
+                ),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
-    def IS_CHANGED(cls, spm_data: str, seed: int = 0, reroll: int = 0, unique_id=None, extra_pnginfo=None):
+    def IS_CHANGED(
+        cls,
+        spm_data: str,
+        seed: int = 0,
+        reroll: int = 0,
+        private_execution: str = "",
+        **_kwargs: object,
+    ):
+        if private_execution:
+            return float("nan")
         payload = f"{spm_data}\n{seed}\n{reroll}".encode("utf-8", errors="replace")
         return hashlib.sha256(payload).hexdigest()
 
-    def resolve(self, spm_data: str, seed: int = 0, reroll: int = 0, unique_id=None, extra_pnginfo=None):
-        state, parse_warnings = parse_spm_data(spm_data, unique_id=unique_id, extra_pnginfo=extra_pnginfo)
+    def resolve(
+        self,
+        spm_data: str,
+        seed: int = 0,
+        reroll: int = 0,
+        unique_id=None,
+        privacy_mode_reference: str = "",
+        private_execution: str = "",
+        _subject_mode_lease: object = None,
+    ):
+        if _subject_mode_lease is None and privacy_mode_reference:
+            if unique_id is None:
+                raise ValueError("PRIVACY_SUBJECT_MODE_REFERENCE_INVALID")
+            with consume_smart_prompt_subject_mode(
+                privacy_mode_reference,
+                unique_id,
+            ) as lease:
+                return self.resolve(
+                    spm_data,
+                    seed,
+                    reroll,
+                    unique_id,
+                    "",
+                    private_execution,
+                    lease,
+                )
+        if unique_id is not None and _subject_mode_lease is None:
+            raise ValueError("PRIVACY_SUBJECT_MODE_REFERENCE_INVALID")
+        private_required = (
+            _subject_mode_lease is not None
+            and smart_prompt_subject_requires_private_execution(
+                _subject_mode_lease
+            )
+        )
+        if private_required and not private_execution:
+            raise ValueError("PRIVACY_EXECUTION_REFERENCE_INVALID")
+        if private_execution:
+            return dispatch_smart_prompt_managed_execution(
+                private_execution,
+                subject_id=unique_id,
+                seed=seed,
+                reroll=reroll,
+            )
+
+        _reject_protected_public_input(spm_data)
+        state, parse_warnings = parse_state(spm_data)
         prompt = selected_prompt(state)
         raw_prompt = str(prompt.get("text", "")) if prompt else ""
         prompt_name = str(prompt.get("title", "")) if prompt else ""

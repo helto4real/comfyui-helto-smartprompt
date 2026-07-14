@@ -170,7 +170,11 @@ When Privacy mode is enabled:
 - workflow reload decrypts the library through the local ComfyUI backend after the shared privacy dialog unlocks or creates the keystore
 - the key and session token are never written into the workflow, exports, copy/paste JSON, or README examples
 
-Back up the shared Helto privacy keystore privately. If it is lost or the password is unavailable, encrypted workflows cannot be decrypted. Encrypted workflows written by older Smart Prompt Manager privacy schemas are not migrated by this version; they show a locked/incompatible state and can be reset from the node UI. Plaintext workflows still load normally.
+Back up the shared Helto privacy keystore privately. If it is lost or the password is unavailable, encrypted workflows cannot be decrypted. Plaintext workflows still load normally. Historical Smart Prompt v1 workflows and exports are supported only through the
+shared runtime's declared legacy readers and explicit legacy-key import and
+verified rewrite flow. If the corresponding key is unavailable, the encrypted
+bytes remain locked and are preserved; there is no fallback to plaintext or an
+empty prompt library.
 
 Privacy mode protects against accidentally sharing clear-text prompts in workflow files. It does not protect against someone with access to the local ComfyUI machine, browser session, Python process, or node outputs during execution.
 
@@ -300,7 +304,9 @@ Core modules:
 
 - `resolver.py`: deterministic variable resolver
 - `schema.py`: schema defaults, normalization, and import merge helpers
-- `privacy.py`: local AES-GCM workflow encryption helpers
+- `managed_privacy.py`: shared privacy profile and workflow adapters
+- `managed_import_export.py`: managed private import/export and legacy migration
+- `managed_execution.py`: protected prompt execution adapters
 - `validation.py`: warning generation
 - `nodes.py`: ComfyUI node class
 - `web/js/smart_prompt_manager.js`: browser UI extension

@@ -1,0 +1,19 @@
+[project]
+name = "comfyui-helto-smartprompt"
+version = "0.1.0"
+description = "Smart Prompt Manager custom node with managed Helto privacy."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@294b43b12280bfb60d6112eb8ba6579a406bb83b",
+    "cryptography>=42.0",
+]
+
+[project.urls]
+Repository = "https://github.com/helto4real/comfyui-helto-smartprompt"
+
+[tool.comfy]
+PublisherId = "helto"
+DisplayName = "Smart Prompt Manager"
+Icon = ""
+web = "web"

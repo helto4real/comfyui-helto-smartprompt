@@ -7,9 +7,22 @@ import helto_privacy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HELTO_PRIVACY_UI = Path(helto_privacy.__file__).resolve().parent / "web" / "privacy_ui.js"
+HELTO_PRIVACY_WEB = Path(helto_privacy.__file__).resolve().parent / "web"
+HELTO_PRIVACY_UI = HELTO_PRIVACY_WEB / "privacy_ui.js"
 HELTO_PRIVACY_UI_SOURCE = HELTO_PRIVACY_UI.read_text(encoding="utf-8") if HELTO_PRIVACY_UI.is_file() else ""
-HAS_PRIVACY_RECOVERY_UI = "registerPrivacyRecoveryDescriptors" in HELTO_PRIVACY_UI_SOURCE
+HELTO_PRIVACY_UI_DEPENDENCIES = {
+    name: (HELTO_PRIVACY_WEB / name).read_text(encoding="utf-8")
+    for name in (
+        "privacy_client.js",
+        "privacy_records.js",
+        "privacy_artifacts.js",
+    )
+    if (HELTO_PRIVACY_WEB / name).is_file()
+}
+HAS_PRIVACY_RECOVERY_UI = (
+    "registerPrivacyRecoveryDescriptors" in HELTO_PRIVACY_UI_SOURCE
+    and len(HELTO_PRIVACY_UI_DEPENDENCIES) == 3
+)
 
 
 def run_node_script(script, *paths):
@@ -360,196 +373,39 @@ assert.equal(selected, "three");
 """
         run_node_script(script, helper_path)
 
-    def test_graph_to_prompt_replaces_execution_spm_data_with_cache_token(self):
+    def test_shared_gate_owns_execution_submission(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
-        self.assertIn('const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";', source)
-        self.assertIn("async function sha256Hex(text)", source)
-        self.assertIn("function liveSpmExecutionState(node, outputNode = null)", source)
-        self.assertIn("async function spmCacheTokenForNode(node, outputNode = null)", source)
-        self.assertIn("function spmExecutionCacheIdentity(state)", source)
-        self.assertIn("canonicalPrivacyPlaintext(spmExecutionCacheIdentity(state))", source)
-        self.assertIn("async function applySpmCacheTokensToPrompt(prompt, graph = defaultGraph())", source)
-        self.assertIn("function prepareSpmPrivacyForSerialization(graph = defaultGraph())", source)
-        self.assertIn("async function waitForSpmPrivacySaves(graph = defaultGraph())", source)
-        self.assertIn("await waitForSpmPrivacySaves(graph);", source)
-        self.assertIn("if (spmQueuePromptDepth > 0)", source)
-        self.assertIn("node._spmPendingPrivacySave = tracked;", source)
-        self.assertIn("const output = prompt?.output;", source)
-        self.assertIn("outputNode.inputs.spm_data = token;", source)
-        self.assertIn("outputNode.is_changed = token;", source)
-        self.assertIn("app.graphToPrompt = wrappedGraphToPrompt", source)
-        self.assertIn('scheduleSpmGraphToPromptPatch("setup")', source)
-        self.assertNotIn("if (spmQueuePromptDepth <= 0)", source)
-        self.assertNotIn("widgets_values[index] = token", source)
-        self.assertNotIn("workflow.nodes", source)
-
-        script = r"""
-import assert from "node:assert/strict";
-import fs from "node:fs";
-
-const source = fs.readFileSync(process.argv.at(-1), "utf8");
-const start = source.indexOf("function liveSpmExecutionState");
-const end = source.indexOf("function prepareSpmPrivacyForSerialization", start);
-assert.notEqual(start, -1);
-assert.notEqual(end, -1);
-const helperSource = source.slice(start, end);
-
-const factory = new Function(`
-const SPM_CACHE_TOKEN_PREFIX = "spm-cache-v1:";
-const SPM_PRIVACY_FIELD = "spm_data";
-
-function widgetByName(node, name) {
-  return node?.widgets?.find((widget) => widget?.name === name) || null;
-}
-
-function normalizeState(value) {
-  return value;
-}
-
-function parseState(value) {
-  return JSON.parse(value);
-}
-
-function isAnyEncryptedStateValue() {
-  return false;
-}
-
-function canonicalPrivacyPlaintext(value) {
-  return JSON.stringify(value);
-}
-
-async function sha256Hex(text) {
-  return String(text);
-}
-
-${helperSource}
-return { spmCacheTokenForNode };
-`);
-
-const { spmCacheTokenForNode } = factory();
-const state = {
-  selectedPromptId: "prompt1",
-  selectedFolderId: "all",
-  folders: [],
-  prompts: [{ id: "prompt1", title: "Title A", text: "A {{mood}} portrait" }],
-  variables: { mood: { mode: "random", values: ["calm", "stormy"] } },
-  cycleState: {},
-};
-const node = {
-  widgets: [
-    { name: "spm_data", value: JSON.stringify(state) },
-    { name: "seed", value: 9999 },
-    { name: "reroll", value: 5 },
-  ],
-};
-
-const token = await spmCacheTokenForNode(node, { inputs: { spm_data: "ignored", seed: 1234, reroll: 7 } });
-assert.match(token, /^spm-cache-v1:/);
-
-const fallbackToken = await spmCacheTokenForNode(node, { inputs: { spm_data: "ignored" } });
-assert.equal(fallbackToken, token, "live widget seed changes are represented by literal queued inputs, not duplicated in spm_data");
-
-const titleChangedState = structuredClone(state);
-titleChangedState.prompts[0].title = "Title B";
-const titleChangedNode = {
-  ...node,
-  widgets: node.widgets.map((widget) => widget.name === "spm_data"
-    ? { ...widget, value: JSON.stringify(titleChangedState) }
-    : { ...widget }),
-};
-const titleChangedToken = await spmCacheTokenForNode(titleChangedNode, { inputs: { seed: 1234, reroll: 7 } });
-assert.notEqual(titleChangedToken, token, "prompt_name changes must invalidate the whole-node cache entry");
-
-const searchChangedState = structuredClone(state);
-searchChangedState.search = "visual-only filter";
-const searchChangedNode = {
-  ...node,
-  widgets: node.widgets.map((widget) => widget.name === "spm_data"
-    ? { ...widget, value: JSON.stringify(searchChangedState) }
-    : { ...widget }),
-};
-const searchChangedToken = await spmCacheTokenForNode(searchChangedNode, { inputs: { seed: 1234, reroll: 7 } });
-assert.equal(searchChangedToken, token, "visual search state must stay cache-neutral");
-"""
-        run_node_script(script, ROOT / "web/js/smart_prompt_manager.js")
-
-    def test_privacy_serialization_hooks_use_stable_envelope_reuse(self):
+        self.assertIn('from "./smart_prompt_managed_privacy.js";', source)
+        self.assertIn("registerSmartPromptManagedOwner(node, managedProductBridge())", source)
+        self.assertNotIn("SPM_CACHE_TOKEN_PREFIX", source)
+        self.assertNotIn("installSpmGraphToPromptPatch", source)
+        self.assertNotIn("app.graphToPrompt = wrappedGraphToPrompt", source)
+    def test_shared_pack_owns_privacy_serialization(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
-        self.assertIn("rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, envelopeString)", source)
-        self.assertIn("encryptedOrReusePrivacyValue(node, SPM_PRIVACY_FIELD", source)
-        self.assertIn("privacy.ensureEncryptedPrivacyValue", source)
-        self.assertIn("Privacy encryption is required before Smart Prompt Manager can serialize private prompt data.", source)
-        self.assertIn("node.onSerialize = function (info)", source)
-        self.assertIn("writeSerializedSpmData(info, currentSerializedSpmData())", source)
-        self.assertIn("dataWidget.serializeValue = async function", source)
-        self.assertIn("node._spmPreparePrivacySerialization = preparePrivacySerialization", source)
-        self.assertIn("forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD)", source)
-        self.assertIn("if (!state.privacyMode) {\n      return dataWidget.value;\n    }", source)
-        self.assertIn("if (!state.privacyMode) {\n      return Promise.resolve(dataWidget.value);\n    }", source)
-        self.assertIn('const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";', source)
-        self.assertIn('const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";', source)
-        self.assertIn('const HELTO_PRIVACY_MODULE_ROUTE = "/helto_privacy/ui/privacy.js";', source)
-        self.assertIn('const HELTO_PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";', source)
-        self.assertIn("spmSharedPrivacyModulePromise = import(HELTO_PRIVACY_MODULE_ROUTE).catch(() => null);", source)
-        self.assertIn('privacy.showPrivacyKeystoreDialog("auto")', source)
-        self.assertIn("const token = privacy?.getStoredPrivacyToken?.();", source)
-        self.assertIn("if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;", source)
-        self.assertIn("retryOnUnlock && await unlockSharedPrivacyForError(error)", source)
-        self.assertIn('const SPM_PRIVACY_RECOVERY_SOURCE = "comfyui-helto-smartprompt";', source)
-        self.assertIn("privacy.registerPrivacyRecoveryDescriptors(SPM_PRIVACY_RECOVERY_SOURCE", source)
-        self.assertIn("spmLockedPrivacyRecoveryDescriptor", source)
-        self.assertIn("locked-current-envelope", source)
-        self.assertIn("_spmPrivacyRecoveryLocked", source)
-        self.assertIn('name: SPM_PRIVACY_FIELD', source)
-        self.assertIn('label: "Prompt library"', source)
-        self.assertIn("showPrivacyRecoveryDialog", source)
-        self.assertIn('data-action="privacy-recovery"', source)
-        self.assertIn('data-action="reset-private-data"', source)
-        self.assertIn("initialUnsupportedEncryptedValue", source)
-        self.assertIn("unsupportedPrivacyEnvelopeString(dataWidget.value)", source)
-        self.assertIn("unsupportedPrivacyEnvelopeDescription", source)
-
-    def test_privacy_encryption_failure_blocks_queue_serialization(self):
-        helper_path = ROOT / "web/js/smart_prompt_manager.js"
-        script = r"""
-import assert from "node:assert/strict";
-import fs from "node:fs";
-
-const source = fs.readFileSync(process.argv.at(-1), "utf8");
-const start = source.indexOf("function prepareSpmPrivacyForSerialization");
-const end = source.indexOf("function installSpmGraphToPromptPatch", start);
-assert.notEqual(start, -1);
-assert.notEqual(end, -1);
-const helperSource = source.slice(start, end);
-
-let graphNodesForTest = [];
-function graphNodes() {
-  return graphNodesForTest;
-}
-
-const factory = new Function("graphNodes", `
-${helperSource}
-return { waitForSpmPrivacySaves };
-`);
-const { waitForSpmPrivacySaves } = factory(graphNodes);
-graphNodesForTest = [{
-  _spmPreparePrivacySerialization() {
-    return Promise.reject(new Error("synthetic encryption failure"));
-  },
-}];
-
-await assert.rejects(
-  () => waitForSpmPrivacySaves({}),
-  /synthetic encryption failure/,
-);
-"""
-        run_node_script(script, helper_path)
-
-        source = helper_path.read_text(encoding="utf-8")
-        self.assertNotIn("if (existingEnvelope) return existingEnvelope;", source)
-
+        managed = (ROOT / "web/js/smart_prompt_managed_privacy.js").read_text(encoding="utf-8")
+        self.assertIn('fetch("/helto_privacy/status", { cache: "no-store" })', managed)
+        self.assertIn("runtime.connectPrivacyPack({", managed)
+        self.assertIn("profileFingerprint: SMART_PROMPT_PROFILE_FINGERPRINT", managed)
+        self.assertIn("writeWorkflowProjection", source)
+        self.assertIn("coordinator.flushEditor(node)", source)
+        for retired in (
+            "dataWidget.serializeValue = async function",
+            "node.onSerialize = function",
+            "getStoredPrivacyToken",
+            "privacy.registerPrivacyRecoveryDescriptors",
+            "_spmPendingPrivacySave",
+        ):
+            self.assertNotIn(retired, source)
+    def test_blocked_suite_conceals_and_rejects_local_fallback(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+        managed = (ROOT / "web/js/smart_prompt_managed_privacy.js").read_text(encoding="utf-8")
+        self.assertIn("Privacy installation blocked:", source)
+        self.assertIn("Prompt data stays concealed until the installation is active.", source)
+        self.assertIn('suite?.suiteStatus !== "active"', managed)
+        self.assertIn("connectionPromise = null;", managed)
+        self.assertNotIn("prepareSpmPrivacyForSerialization", source)
     def test_unknown_encrypted_schema_stays_locked_for_recovery(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"
         script = r"""
@@ -699,6 +555,10 @@ assert.equal(isAnyEncryptedStateValue({ prompts: [] }), false);
         self.assertIn("Hidden prompt. Hover over the node to reveal it.", source)
         self.assertIn("const revealSelectedPreview = !selectedPreviewHidden || previewRevealActive;", source)
         self.assertIn("const revealItem = !itemHidden || previewRevealActive;", source)
+        self.assertIn(
+            "return Boolean(state.privacyMode || prompt.hidden || folderById(state, prompt.folderId)?.hidden);",
+            source,
+        )
 
     def test_dialog_event_delegation_uses_current_controls(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
@@ -853,6 +713,12 @@ assert.equal(plaintext.dirty, true);
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             (tmp_path / "privacy_ui.mjs").write_text(HELTO_PRIVACY_UI_SOURCE, encoding="utf-8")
+            (tmp_path / "package.json").write_text(
+                '{"type":"module"}',
+                encoding="utf-8",
+            )
+            for name, source in HELTO_PRIVACY_UI_DEPENDENCIES.items():
+                (tmp_path / name).write_text(source, encoding="utf-8")
             script_path = tmp_path / "test.mjs"
             script_path.write_text(script, encoding="utf-8")
             result = subprocess.run(
@@ -864,410 +730,32 @@ assert.equal(plaintext.dirty, true);
             )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_import_export_helpers_package_privacy_and_merge_behaviour(self):
+    def test_import_export_delegates_to_managed_operations(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"
         source = helper_path.read_text(encoding="utf-8")
         import_start = source.index("async function importLibraryText(raw, replace)")
         import_end = source.index("async function importLibraryFile(file, replace)", import_start)
         import_library = source[import_start:import_end]
 
-        self.assertIn('const result = await privacyPost("decrypt", { payload: parseJsonObject(imported.spmData) });', import_library)
-        self.assertIn("privacyLocked = false;", import_library)
-        self.assertIn("rememberPrivacyEnvelope(node, SPM_PRIVACY_FIELD, state, imported.spmData)", import_library)
-        self.assertIn("setWidgetRawValue(node, dataWidget, imported.spmData)", import_library)
-        self.assertIn("syncSpmSerializedWidgetValues(node, { spmDataValue: imported.spmData, dirty: true })", import_library)
-        self.assertIn('status = importStatus("Imported encrypted library", result.warnings);', import_library)
-        self.assertIn("Imported encrypted library, but could not decrypt it with the shared privacy keystore", import_library)
-        self.assertIn('status = `Error: ${error.message}`;', source)
+        self.assertIn("await coordinator.importReplace(node, raw)", import_library)
+        self.assertIn("await coordinator.importMerge(node, raw)", import_library)
+        self.assertNotIn("privacyPost(", import_library)
+        self.assertNotIn("setWidgetRawValue", import_library)
         self.assertIn('const input = document.createElement("input");', source)
         self.assertIn('input.type = "file";', source)
         self.assertIn('await importLibraryFile(input.files?.[0], replace);', source)
-        self.assertNotIn('data-role="import-file"', source)
-        self.assertIn('data-library-action="export"', source)
-        self.assertIn('data-library-action="merge"', source)
-        self.assertIn('data-library-action="replace"', source)
-        self.assertNotIn('data-action="export-library"', source)
-        self.assertIn("if (isLibraryImportText(raw))", source)
-        library_handler_start = source.index("const libraryButton = event.target.closest?.(\"[data-library-action]\");")
-        library_handler_end = source.index("const actionButton = event.target.closest?.(\"[data-action]\");", library_handler_start)
-        library_handler = source[library_handler_start:library_handler_end]
-        self.assertIn("await exportLibraryFile();", library_handler)
-        self.assertNotIn("selectedPromptJson", library_handler)
-        self.assertNotIn("promptJson", library_handler)
-
-        script = r"""
-import assert from "node:assert/strict";
-import fs from "node:fs";
-
-const source = fs.readFileSync(process.argv.at(-1), "utf8");
-const helperStart = source.indexOf("function nowIso()");
-const helperEnd = source.indexOf("// ---- End import/export helpers ----");
-const suffixStart = source.indexOf("function suffixName(");
-const suffixEnd = source.indexOf("function setWidgetValue", suffixStart);
-assert.notEqual(helperStart, -1);
-assert.notEqual(helperEnd, -1);
-assert.notEqual(suffixStart, -1);
-assert.notEqual(suffixEnd, -1);
-const helperSource = `${source.slice(helperStart, helperEnd).replace(/^export /gm, "")}\n${source.slice(suffixStart, suffixEnd)}`;
-
-const factory = new Function(`
-const VALID_NAME_RE = /^[A-Za-z0-9_-]+$/;
-const MODES = ["random", "fixed", "cycle"];
-const VIRTUAL_FOLDERS = [
-  { id: "all", name: "All" },
-  { id: "unsorted", name: "Unsorted" },
-  { id: "favorites", name: "Favorites" },
-];
-const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
-const SPM_EXPORT_VERSION = 1;
-const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
-const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
-let uuidCounter = 0;
-const crypto = {
-  randomUUID() {
-    uuidCounter += 1;
-    return \`00000000-0000-0000-0000-\${String(uuidCounter).padStart(12, "0")}\`;
-  },
-};
-${helperSource}
-return {
-  buildSpmExportPackage,
-  isLibraryImportText,
-  parseSpmImport,
-  mergeImportedLibraryState,
-  spmExportFileName,
-};`);
-
-const {
-  buildSpmExportPackage,
-  isLibraryImportText,
-  parseSpmImport,
-  mergeImportedLibraryState,
-  spmExportFileName,
-} = factory();
-
-function prompt(id, title, folderId = "folder_current") {
-  return {
-    id,
-    title,
-    text: `Prompt ${title}`,
-    description: "",
-    folderId,
-    tags: [],
-    favorite: false,
-    locked: false,
-    hidden: false,
-    createdAt: "2026-07-01T00:00:00Z",
-    updatedAt: "2026-07-01T00:00:00Z",
-  };
-}
-
-function variable(values) {
-  return { mode: "random", values, fixedValue: null, fallback: "", description: "" };
-}
-
-function state(prompts, variables = { mood: variable(["calm"]) }) {
-  return {
-    version: 1,
-    selectedFolderId: "all",
-    selectedPromptId: prompts[0]?.id || "",
-    search: "",
-    privacyMode: false,
-    folders: [{ id: "folder_current", name: "Portraits", hidden: false }],
-    prompts,
-    variables,
-    cycleState: { mood: 1 },
-    ui: { collapsedSections: {} },
-  };
-}
-
-const SPM_PRIVACY_SCHEMA_FOR_TEST = "helto.smart-prompt-manager";
-const SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST = "comfyui-helto-prompts.smart-prompt-manager";
-
-function envelope(id, schema = SPM_PRIVACY_SCHEMA_FOR_TEST) {
-  return JSON.stringify({
-    version: 1,
-    schema,
-    encrypted: true,
-    algorithm: "AES-256-GCM",
-    keyId: "test-key",
-    nonce: `nonce-${id}`,
-    ciphertext: `ciphertext-${id}`,
-  }, null, 2);
-}
-
-const exportedAt = "2026-07-01T12:34:56Z";
-const plaintextState = state([
-  prompt("prompt_current", "Cinematic portrait"),
-  prompt("prompt_second", "Wide landscape"),
-]);
-const plaintextPackage = buildSpmExportPackage(plaintextState, false, exportedAt);
-assert.equal(plaintextPackage.format, "comfyui-helto-prompts.smart-prompt-manager.export");
-assert.equal(plaintextPackage.version, 1);
-assert.equal(plaintextPackage.encrypted, false);
-assert.equal(plaintextPackage.exportedAt, exportedAt);
-assert.equal(plaintextPackage.spm_data.prompts[0].title, "Cinematic portrait");
-assert.equal(plaintextPackage.spm_data.prompts[1].title, "Wide landscape");
-assert.equal(plaintextPackage.spm_data.prompts.length, 2);
-assert.equal(spmExportFileName(exportedAt), "smart-prompt-manager-library-2026-07-01T12-34-56Z.json");
-
-const parsedPlaintext = parseSpmImport(JSON.stringify(plaintextPackage));
-assert.equal(parsedPlaintext.encrypted, false);
-assert.equal(parsedPlaintext.state.prompts[0].title, "Cinematic portrait");
-assert.equal(parsedPlaintext.state.prompts[1].title, "Wide landscape");
-assert.equal(parsedPlaintext.state.prompts.length, 2);
-assert.equal(isLibraryImportText(JSON.stringify(plaintextPackage)), true);
-assert.equal(isLibraryImportText(JSON.stringify(plaintextState)), true);
-
-const poisonedVariableLibrary = {
-  ...plaintextState,
-  seed: 1125899906842624,
-  reroll: 99,
-  control_after_generate: "randomize",
-  widgets_values: ["{}", 1125899906842624, "randomize", 99],
-  last_serialization: { widgets_values: ["{}", 1125899906842624, "randomize", 99] },
-};
-const parsedPoisoned = parseSpmImport(JSON.stringify(poisonedVariableLibrary));
-assert.equal(parsedPoisoned.encrypted, false);
-assert.equal(parsedPoisoned.state.prompts.length, 2);
-assert.deepEqual(parsedPoisoned.state.variables.mood.values, ["calm"]);
-assert.equal(Object.hasOwn(parsedPoisoned.state, "seed"), false);
-assert.equal(Object.hasOwn(parsedPoisoned.state, "reroll"), false);
-assert.equal(Object.hasOwn(parsedPoisoned.state, "widgets_values"), false);
-assert.equal(Object.hasOwn(parsedPoisoned.state, "last_serialization"), false);
-assert.equal(Object.hasOwn(parsedPoisoned.state, "control_after_generate"), false);
-
-const singlePromptJson = JSON.stringify({
-  version: 1,
-  prompt: prompt("prompt_only", "Only one"),
-  variables: { mood: variable(["calm"]) },
-});
-assert.equal(isLibraryImportText(singlePromptJson), false);
-assert.equal(isLibraryImportText("not json"), false);
-assert.throws(
-  () => parseSpmImport(singlePromptJson),
-  /single-prompt JSON/,
-);
-
-const encryptedEnvelope = envelope("private");
-const privatePackage = buildSpmExportPackage(encryptedEnvelope, true, exportedAt);
-assert.equal(privatePackage.encrypted, true);
-assert.equal(privatePackage.spm_data, encryptedEnvelope);
-assert.equal(privatePackage.spm_data.includes("Cinematic portrait"), false);
-
-const parsedEncrypted = parseSpmImport(JSON.stringify(privatePackage));
-assert.equal(parsedEncrypted.encrypted, true);
-assert.equal(parsedEncrypted.spmData, encryptedEnvelope);
-assert.equal(parsedEncrypted.state, null);
-assert.throws(
-  () => parseSpmImport(envelope("legacy", SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST)),
-  /unsupported legacy privacy schema/,
-);
-assert.throws(
-  () => parseSpmImport(envelope("future", "future.smart-prompt-manager")),
-  /unsupported encrypted privacy schema or algorithm/,
-);
-assert.throws(
-  () => parseSpmImport(JSON.stringify({ ...privatePackage, spm_data: envelope("legacy-export", SPM_LEGACY_PRIVACY_SCHEMA_FOR_TEST) })),
-  /unsupported legacy privacy schema/,
-);
-
-const current = state([
-  prompt("prompt_current", "Same"),
-  prompt("prompt_imported", "Same - imported"),
-], { mood: variable(["calm"]) });
-const incoming = state([prompt("prompt_incoming", "Same")], {
-  mood: variable(["dramatic"]),
-  weather: variable(["rain"]),
-});
-incoming.cycleState.weather = 3;
-const merged = mergeImportedLibraryState(current, incoming);
-assert.equal(merged.state.prompts.length, 3);
-assert.equal(merged.state.prompts[2].title, "Same - imported 2");
-assert.notEqual(merged.state.prompts[2].id, "prompt_incoming");
-assert.equal(merged.state.prompts[2].folderId, merged.state.folders[1].id);
-assert.deepEqual(merged.state.variables.weather.values, ["rain"]);
-assert.equal(merged.state.cycleState.weather, 3);
-assert.deepEqual(merged.state.variables.mood.values, ["calm"]);
-assert.equal(merged.warnings.length, 1);
-assert.match(merged.warnings[0], /not overwritten/);
-"""
-        run_node_script(script, helper_path)
-
-    def test_plaintext_library_replace_preserves_destination_privacy_mode(self):
-        helper_path = ROOT / "web/js/smart_prompt_manager.js"
-        script = r"""
-import assert from "node:assert/strict";
-import fs from "node:fs";
-
-const source = fs.readFileSync(process.argv.at(-1), "utf8");
-const start = source.indexOf("async function importLibraryText(raw, replace)");
-const end = source.indexOf("async function importLibraryFile", start);
-assert.notEqual(start, -1);
-assert.notEqual(end, -1);
-const helperSource = source.slice(start, end);
-
-const factory = new Function(`
-const SPM_PRIVACY_FIELD = "spm_data";
-let state = { privacyMode: true, prompts: [{ id: "current" }] };
-let saveCount = 0;
-const node = {};
-const dataWidget = {};
-function parseSpmImport() {
-  return { encrypted: false, state: { privacyMode: false, prompts: [{ id: "imported" }] } };
-}
-function forgetPrivacyEnvelope() {}
-function save() { saveCount += 1; }
-${helperSource}
-return {
-  importLibraryText,
-  getState: () => state,
-  getSaveCount: () => saveCount,
-};
-`);
-
-const replacement = factory();
-await replacement.importLibraryText("{}", true);
-assert.equal(replacement.getState().privacyMode, true);
-assert.equal(replacement.getState().prompts[0].id, "imported");
-assert.equal(replacement.getSaveCount(), 1);
-"""
-        run_node_script(script, helper_path)
-
-    def test_privacy_envelope_memo_helper_behaviour(self):
-        helper_path = ROOT / "web/js/smart_prompt_manager.js"
-        script = r"""
-import assert from "node:assert/strict";
-import fs from "node:fs";
-
-const source = fs.readFileSync(process.argv[1], "utf8");
-const start = source.indexOf("// ---- Privacy envelope memo helpers ----");
-const end = source.indexOf("// ---- End privacy envelope memo helpers ----");
-assert.notEqual(start, -1);
-assert.notEqual(end, -1);
-const helperSource = source.slice(start, end).replace(/^export /gm, "");
-
-for (const forbidden of ["localStorage", "sessionStorage", "indexedDB", "caches.open", "document.cookie"]) {
-  assert.equal(helperSource.includes(forbidden), false, `${forbidden} must not be used by privacy memo helpers`);
-}
-
-function parseJsonObject(value) {
-  if (value && typeof value === "object") return value;
-  if (typeof value !== "string" || !value.trim()) return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-const factory = new Function("parseJsonObject", `
-const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
-const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
-${helperSource}
-return {
-  rememberPrivacyEnvelope,
-  rememberedPrivacyEnvelope,
-  encryptedOrReusePrivacyValue,
-  encryptedPrivacyEnvelopeString,
-  forgetPrivacyEnvelope,
-};`);
-const {
-  rememberPrivacyEnvelope,
-  rememberedPrivacyEnvelope,
-  encryptedOrReusePrivacyValue,
-  encryptedPrivacyEnvelopeString,
-  forgetPrivacyEnvelope,
-} = factory(parseJsonObject);
-
-const SPM_PRIVACY_SCHEMA = "helto.smart-prompt-manager";
-const SPM_LEGACY_PRIVACY_SCHEMA = "comfyui-helto-prompts.smart-prompt-manager";
-
-function envelope(id, schema = SPM_PRIVACY_SCHEMA) {
-  return JSON.stringify({
-    version: 1,
-    schema,
-    encrypted: true,
-    algorithm: "AES-256-GCM",
-    keyId: "test-key",
-    nonce: `nonce-${id}`,
-    ciphertext: `ciphertext-${id}`,
-  }, null, 2);
-}
-
-const owner = {};
-const originalEnvelope = envelope("original");
-rememberPrivacyEnvelope(owner, "spm_data", { b: 2, a: 1 }, originalEnvelope);
-assert.equal(rememberedPrivacyEnvelope(owner, "spm_data", { a: 1, b: 2 }), originalEnvelope);
-
-let calls = 0;
-const reused = await encryptedOrReusePrivacyValue(owner, "spm_data", { a: 1, b: 2 }, async () => {
-  calls += 1;
-  return envelope("unexpected");
-});
-assert.equal(reused, originalEnvelope);
-assert.equal(calls, 0);
-
-const changedEnvelope = envelope("changed");
-const changed = await encryptedOrReusePrivacyValue(owner, "spm_data", { a: 1, b: 3 }, async () => {
-  calls += 1;
-  return changedEnvelope;
-});
-assert.equal(changed, changedEnvelope);
-assert.equal(calls, 1);
-
-const changedAgain = await encryptedOrReusePrivacyValue(owner, "spm_data", { b: 3, a: 1 }, async () => {
-  calls += 1;
-  return envelope("changed-again");
-});
-assert.equal(changedAgain, changedEnvelope);
-assert.equal(calls, 1);
-
-const concurrentOwner = {};
-calls = 0;
-const [one, two] = await Promise.all([
-  encryptedOrReusePrivacyValue(concurrentOwner, "spm_data", { value: "same" }, async () => {
-    calls += 1;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    return envelope("concurrent");
-  }),
-  encryptedOrReusePrivacyValue(concurrentOwner, "spm_data", { value: "same" }, async () => {
-    calls += 1;
-    return envelope("concurrent-other");
-  }),
-]);
-assert.equal(one, envelope("concurrent"));
-assert.equal(two, envelope("concurrent"));
-assert.equal(calls, 1);
-
-calls = 0;
-const currentEnvelope = envelope("current");
-const passthrough = await encryptedOrReusePrivacyValue({}, "spm_data", currentEnvelope, async () => {
-  calls += 1;
-  return envelope("bad");
-});
-assert.equal(passthrough, currentEnvelope);
-assert.equal(calls, 0);
-assert.equal(encryptedPrivacyEnvelopeString(JSON.parse(currentEnvelope)), currentEnvelope);
-assert.equal(encryptedPrivacyEnvelopeString(JSON.parse(envelope("legacy", SPM_LEGACY_PRIVACY_SCHEMA))), "");
-
-forgetPrivacyEnvelope(owner, "spm_data");
-const afterForget = await encryptedOrReusePrivacyValue(owner, "spm_data", { a: 1, b: 3 }, async () => {
-  calls += 1;
-  return envelope("after-forget");
-});
-assert.equal(afterForget, envelope("after-forget"));
-assert.equal(calls, 1);
-"""
-        subprocess.run(
-            ["node", "--input-type=module", "-e", script, str(helper_path)],
-            check=True,
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_import_replace_and_merge_use_distinct_managed_operations(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+        start = source.index("async function importLibraryText(raw, replace)")
+        end = source.index("async function importLibraryFile(file, replace)", start)
+        live = source[start:end]
+        self.assertIn("replace\n      ? await coordinator.importReplace(node, raw)", live)
+        self.assertIn(": await coordinator.importMerge(node, raw);", live)
+        self.assertNotIn("destinationPrivacyMode", live)
+    def test_local_envelope_memo_is_removed(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+        managed = (ROOT / "web/js/smart_prompt_managed_privacy.js").read_text(encoding="utf-8")
+        self.assertNotIn("SPM_PRIVACY_MEMOS", source)
+        self.assertNotIn("encryptedOrReusePrivacyValue", source)
+        self.assertNotIn("rememberPrivacyEnvelope", source)
+        self.assertIn("connectPrivacyPack", managed)
