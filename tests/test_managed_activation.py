@@ -24,6 +24,13 @@ class SmartPromptManagedActivationTests(unittest.TestCase):
         ]
 
         self.assertEqual(project["project"]["dependencies"], requirements)
+        self.assertEqual(requirements[0], "helto-privacy==0.4.0")
+        self.assertTrue(
+            all(
+                marker not in "\n".join(requirements)
+                for marker in ("file:", "/home/", "@main", "@master", "git+")
+            )
+        )
         self.assertEqual(
             project["project"]["urls"]["Repository"],
             "https://github.com/helto4real/comfyui-helto-smartprompt",
