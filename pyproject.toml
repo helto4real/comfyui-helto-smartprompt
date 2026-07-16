@@ -1,11 +1,11 @@
 [project]
 name = "comfyui-helto-smartprompt"
-version = "0.1.4"
+version = "0.1.5"
 description = "Smart Prompt Manager custom node with managed Helto privacy."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "helto-privacy==0.4.4",
+    "helto-privacy==0.4.5",
     "cryptography>=42.0",
 ]
 
