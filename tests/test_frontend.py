@@ -409,7 +409,7 @@ assert.equal(selected, "three");
         managed = (ROOT / "web/js/smart_prompt_managed_privacy.js").read_text(encoding="utf-8")
         self.assertIn("Privacy installation blocked:", source)
         self.assertIn("Prompt data stays concealed until the installation is active.", source)
-        self.assertIn('suite?.suiteStatus !== "active"', managed)
+        self.assertIn('["ready", "activation-required", "active"]', managed)
         self.assertIn("connectionPromise = null;", managed)
         self.assertNotIn("prepareSpmPrivacyForSerialization", source)
     def test_unknown_encrypted_schema_stays_locked_for_recovery(self):

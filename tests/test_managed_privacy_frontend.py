@@ -68,7 +68,7 @@ class SmartPromptManagedPrivacyFrontendTests(unittest.TestCase):
             '"5a352fd3fb086cd3418039368457e7a2fbd8b4ae81aa0deae6151d8bcbd22352"',
             managed,
         )
-        self.assertIn('suite?.suiteStatus !== "active"', managed)
+        self.assertIn('["ready", "activation-required", "active"]', managed)
         self.assertIn("suiteManifestDigest: suite.suiteManifestDigest", managed)
         self.assertIn("adapterFactories:", managed)
         self.assertIn('pack.workflow(WORKFLOW_RESOURCE_ID)', managed)

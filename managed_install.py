@@ -6,7 +6,9 @@ from threading import RLock
 
 from helto_privacy import (
     BoundPrivacyPack,
+    ConsumerSuiteDeclaration,
     install,
+    register_consumer_suite_declaration,
     register_legacy_reader_units,
     smart_prompt_v1_export_reader_unit,
     smart_prompt_v1_reader_unit,
@@ -46,6 +48,7 @@ except ImportError:  # Allows focused tests from the repository root.
 
 
 _INSTALL_LOCK = RLock()
+SMART_PROMPT_SUITE_ID = "helto-suite-2026-07-16.2"
 _PACK: BoundPrivacyPack | None = None
 _ADAPTERS: dict[str, object] | None = None
 _IMPORT_EXPORT: SmartPromptImportExportAdapter | None = None
@@ -71,6 +74,9 @@ def install_smart_prompt_privacy() -> BoundPrivacyPack:
         if set(adapters) != expected:
             raise RuntimeError("Smart Prompt privacy adapter binding is incomplete.")
         pack = install(profile, adapters)
+        register_consumer_suite_declaration(
+            ConsumerSuiteDeclaration(profile.distribution, SMART_PROMPT_SUITE_ID)
+        )
         import_export.bind(
             workflow=pack.workflow(PROMPT_LIBRARY_WORKFLOW_RESOURCE_ID),
             migration=pack.migration,

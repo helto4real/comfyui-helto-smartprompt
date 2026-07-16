@@ -117,7 +117,8 @@ async function connect() {
   const response = await fetch("/helto_privacy/status", { cache: "no-store" });
   if (!response.ok) blocked();
   const suite = await response.json();
-  if (suite?.ok !== true || suite?.suiteStatus !== "active"
+  if (suite?.ok !== true
+      || !["ready", "activation-required", "active"].includes(suite?.suiteStatus)
       || !/^[0-9a-f]{64}$/.test(String(suite?.suiteManifestDigest || ""))) {
     blocked();
   }
