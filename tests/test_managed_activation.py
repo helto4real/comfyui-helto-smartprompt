@@ -24,7 +24,7 @@ class SmartPromptManagedActivationTests(unittest.TestCase):
         ]
 
         self.assertEqual(project["project"]["dependencies"], requirements)
-        self.assertEqual(requirements[0], "helto-privacy==0.4.3")
+        self.assertEqual(requirements[0], "helto-privacy==0.4.4")
         self.assertTrue(
             all(
                 marker not in "\n".join(requirements)
