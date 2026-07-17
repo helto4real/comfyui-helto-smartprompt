@@ -25,6 +25,10 @@ class SmartPromptManagedActivationTests(unittest.TestCase):
 
         self.assertEqual(project["project"]["dependencies"], requirements)
         self.assertEqual(requirements[0], "helto-privacy==0.4.5")
+        self.assertEqual(
+            managed_install.SMART_PROMPT_SUITE_ID,
+            "helto-suite-2026-07-17.2",
+        )
         self.assertTrue(
             all(
                 marker not in "\n".join(requirements)
