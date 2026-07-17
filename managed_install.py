@@ -48,7 +48,7 @@ except ImportError:  # Allows focused tests from the repository root.
 
 
 _INSTALL_LOCK = RLock()
-SMART_PROMPT_SUITE_ID = "helto-suite-2026-07-17.2"
+SMART_PROMPT_SUITE_ID = "helto-suite-2026-07-17.3"
 _PACK: BoundPrivacyPack | None = None
 _ADAPTERS: dict[str, object] | None = None
 _IMPORT_EXPORT: SmartPromptImportExportAdapter | None = None

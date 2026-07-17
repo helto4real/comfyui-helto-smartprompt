@@ -35,6 +35,20 @@ def run_node_script(script, *paths):
 
 
 class SmartPromptManagerFrontendTests(unittest.TestCase):
+    def test_vue_widget_sizing_is_stable_and_does_not_feed_back_node_height(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+
+        self.assertIn("delete uiWidget.computeLayoutSize;", source)
+        self.assertIn("uiWidget.getMinHeight = () => PANEL_MIN_HEIGHT;", source)
+        self.assertIn("uiWidget.getMaxHeight = undefined;", source)
+        self.assertIn("uiWidget.getHeight = () => PANEL_DEFAULT_HEIGHT;", source)
+        self.assertIn("delete uiWidget.options.getMaxHeight;", source)
+        self.assertIn('widgetFrame.style.height = vueLayout ? "100%"', source)
+        self.assertIn('widgetFrame.style.maxHeight = vueLayout ? "none"', source)
+        self.assertIn('root.style.height = vueLayout ? "100%"', source)
+        self.assertNotIn("uiWidget.getMinHeight = () => panelHeight();", source)
+        self.assertNotIn("uiWidget.getMaxHeight = () => panelHeight();", source)
+
     def test_seed_frontend_randomizes_live_seed_before_queue(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 

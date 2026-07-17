@@ -1432,14 +1432,17 @@ function enhanceNode(node) {
   function syncWidgetSizingCallbacks() {
     if (!uiWidget) return;
     if (shouldUseVueLayout()) {
-      uiWidget.computeLayoutSize = undefined;
+      // Nodes 2.0 owns the DOM widget row height. Keep its layout contract
+      // independent from node.size or ResizeObserver feedback will continually
+      // increase both the widget and node height.
+      delete uiWidget.computeLayoutSize;
       uiWidget.computeSize = undefined;
-      uiWidget.getMinHeight = () => panelHeight();
-      uiWidget.getMaxHeight = () => panelHeight();
-      uiWidget.getHeight = () => panelHeight();
+      uiWidget.getMinHeight = () => PANEL_MIN_HEIGHT;
+      uiWidget.getMaxHeight = undefined;
+      uiWidget.getHeight = () => PANEL_DEFAULT_HEIGHT;
       if (uiWidget.options) {
         uiWidget.options.getMinHeight = uiWidget.getMinHeight;
-        uiWidget.options.getMaxHeight = uiWidget.getMaxHeight;
+        delete uiWidget.options.getMaxHeight;
         uiWidget.options.getHeight = uiWidget.getHeight;
       }
       return;
@@ -1465,21 +1468,24 @@ function enhanceNode(node) {
   function syncPanelSize({ dirty = true } = {}) {
     refreshNodeTheme();
     syncWidgetSizingCallbacks();
-    const legacyLayout = uiWidget && !shouldUseVueLayout();
+    const vueLayout = shouldUseVueLayout();
+    const legacyLayout = uiWidget && !vueLayout;
+    const stablePanelHeight = panelHeight();
     widgetFrame.style.boxSizing = "border-box";
     widgetFrame.style.margin = "0";
     widgetFrame.style.width = "100%";
-    widgetFrame.style.height = `${panelHeight()}px`;
-    widgetFrame.style.minHeight = `${panelHeight()}px`;
-    widgetFrame.style.maxHeight = `${panelHeight()}px`;
+    widgetFrame.style.height = vueLayout ? "100%" : `${stablePanelHeight}px`;
+    widgetFrame.style.minHeight = vueLayout ? `${PANEL_MIN_HEIGHT}px` : `${stablePanelHeight}px`;
+    widgetFrame.style.maxHeight = vueLayout ? "none" : `${stablePanelHeight}px`;
     // Fill the widget area edge-to-edge and let the root's symmetric padding
     // form the gap to the node body, so left/right/bottom margins all match.
     // (Forcing a pixel width here left-aligned the panel and pushed the slack
     // onto the right side.)
     root.style.width = legacyLayout ? `calc(100% - ${PANEL_HORIZONTAL_GUTTER * 2}px)` : "100%";
     root.style.margin = legacyLayout ? `0 ${PANEL_HORIZONTAL_GUTTER}px` : "0";
-    root.style.height = `${panelHeight()}px`;
-    root.style.maxHeight = `${panelHeight()}px`;
+    root.style.height = vueLayout ? "100%" : `${stablePanelHeight}px`;
+    root.style.minHeight = vueLayout ? `${PANEL_MIN_HEIGHT}px` : `${stablePanelHeight}px`;
+    root.style.maxHeight = vueLayout ? "none" : `${stablePanelHeight}px`;
     syncLegacyWidgetBounds();
     if (dirty) node.graph?.setDirtyCanvas(true, true);
   }
@@ -2898,9 +2904,8 @@ function enhanceNode(node) {
     uiWidget = node.addDOMWidget("smart_prompt_manager_ui", "SmartPromptManager", widgetFrame, {
       serialize: false,
       hideOnZoom: false,
-      getMinHeight: () => panelHeight(),
-      getMaxHeight: () => panelHeight(),
-      getHeight: () => panelHeight(),
+      getMinHeight: () => PANEL_MIN_HEIGHT,
+      getHeight: () => PANEL_DEFAULT_HEIGHT,
       onDraw: () => syncPanelSize({ dirty: false }),
     });
     syncWidgetSizingCallbacks();

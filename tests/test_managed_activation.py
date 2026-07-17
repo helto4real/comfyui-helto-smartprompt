@@ -27,7 +27,7 @@ class SmartPromptManagedActivationTests(unittest.TestCase):
         self.assertEqual(requirements[0], "helto-privacy==0.4.5")
         self.assertEqual(
             managed_install.SMART_PROMPT_SUITE_ID,
-            "helto-suite-2026-07-17.2",
+            "helto-suite-2026-07-17.3",
         )
         self.assertTrue(
             all(
