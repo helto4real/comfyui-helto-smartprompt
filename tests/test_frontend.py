@@ -22,22 +22,33 @@ def run_node_script(script, *paths):
 
 
 class SmartPromptManagerFrontendTests(unittest.TestCase):
+    def test_vue_widget_sizing_is_stable_and_does_not_feed_back_node_height(self):
+        source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
+
+        self.assertIn("delete uiWidget.computeLayoutSize;", source)
+        self.assertIn("uiWidget.getMinHeight = () => PANEL_MIN_HEIGHT;", source)
+        self.assertIn("uiWidget.getMaxHeight = undefined;", source)
+        self.assertIn("uiWidget.getHeight = () => PANEL_DEFAULT_HEIGHT;", source)
+        self.assertIn("delete uiWidget.options.getMaxHeight;", source)
+        self.assertIn('widgetFrame.style.height = vueLayout ? "100%"', source)
+        self.assertIn('widgetFrame.style.maxHeight = vueLayout ? "none"', source)
+        self.assertIn('root.style.height = vueLayout ? "100%"', source)
+        self.assertNotIn("uiWidget.getMinHeight = () => panelHeight();", source)
+        self.assertNotIn("uiWidget.getMaxHeight = () => panelHeight();", source)
+
     def test_seed_frontend_randomizes_live_seed_before_queue(self):
         source = (ROOT / "web/js/smart_prompt_manager.js").read_text(encoding="utf-8")
 
         self.assertIn("const SEED_MAX = 1125899906842624;", source)
         self.assertIn("Math.floor(randomUnit53() * (SEED_MAX - 1)) + 1", source)
         self.assertIn("// ---- Seed queue helpers ----", source)
-        self.assertIn("function randomizeSpmSeedsBeforeQueue()", source)
+        self.assertIn("function installSpmSeedQueueLifecycle(node)", source)
         self.assertIn('liveSeedControlMode(node) !== "randomize"', source)
         self.assertIn("delete node._spmQueuedSeed;", source)
         self.assertIn("writeSpmSeedValue(node, seed)", source)
-        self.assertIn("suspendSeedControlCallbacks(controlWidget)", source)
-        self.assertIn("restoreQueuedSpmSeeds(queuedSeeds)", source)
-        self.assertIn("app.queuePrompt = wrappedQueuePrompt", source)
-        self.assertIn('scheduleSpmSeedQueuePatch("setup")', source)
-        self.assertIn("spmQueuePromptDepth += 1;", source)
-        self.assertIn("spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);", source)
+        self.assertIn("target.beforeQueued = function", source)
+        self.assertIn("target.afterQueued = function", source)
+        self.assertNotIn("app.queuePrompt = wrappedQueuePrompt", source)
 
     def test_seed_queue_helpers_only_randomize_explicit_randomize_mode(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"
@@ -84,6 +95,11 @@ const app = {
 const NODE_CLASS = "SmartPromptManager";
 const SPM_PRIVACY_FIELD = "spm_data";
 const SEED_CONTROL_MODES = ["fixed", "increment", "decrement", "randomize"];
+const SPM_SEED_QUEUE_LIFECYCLE_KEY = "__smartPromptManagerSeedQueueLifecycle";
+const SPM_SEED_QUEUE_ACTIVE_KEY = "__smartPromptManagerActiveQueuedSeed";
+const SPM_SEED_QUEUE_MAX_AGE_MS = 10000;
+let spmQueuePromptDepth = 0;
+let spmQueuePromptDeadline = 0;
 let graphNodesForTest = [];
 
 function graphNodes() {
@@ -109,10 +125,10 @@ return {
   clearQueuedSeedUnlessRandomize,
   installSpmSeedSerializedSync,
   installSpmSeedControlPersistence,
+  installSpmSeedQueueLifecycle,
   liveSeedControlMode,
   normalizeSpmWidgetsValuesForConfigure,
-  randomizeSpmSeedsBeforeQueue,
-  restoreQueuedSpmSeeds,
+  spmQueuePromptActive,
   spmSerializedWidgetValues,
   syncSpmSeedSerializedValue,
   syncSpmSerializedWidgetValues,
@@ -127,10 +143,10 @@ const {
   clearQueuedSeedUnlessRandomize,
   installSpmSeedSerializedSync,
   installSpmSeedControlPersistence,
+  installSpmSeedQueueLifecycle,
   liveSeedControlMode,
   normalizeSpmWidgetsValuesForConfigure,
-  randomizeSpmSeedsBeforeQueue,
-  restoreQueuedSpmSeeds,
+  spmQueuePromptActive,
   spmSerializedWidgetValues,
   syncSpmSeedSerializedValue,
   syncSpmSerializedWidgetValues,
@@ -216,26 +232,31 @@ function makeNode(mode, options = {}) {
 for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   const { node, seedWidget, controlWidget, seed } = makeNode(mode, { seed: 2222, serializedSeed: 1111 });
   node._spmQueuedSeed = { seed: 987654321, at: Date.now() };
-  setGraphNodesForTest([node]);
-  const queued = randomizeSpmSeedsBeforeQueue();
-  assert.equal(queued.length, 0, `${mode} must not queue an SPM random seed`);
+  installSpmSeedControlPersistence(node);
+  assert.equal(installSpmSeedQueueLifecycle(node), true);
+  controlWidget.beforeQueued();
+  assert.equal(spmQueuePromptActive(), true);
   assert.equal(node._spmQueuedSeed, undefined, `${mode} must clear stale queued random seed state`);
   assert.equal(seedWidget.value, seed, `${mode} must leave the live seed unchanged`);
   assert.equal(node.widgets_values[1], seed, `${mode} must sync serialized seed to live seed`);
   assert.equal(node.last_serialization.widgets_values[1], seed, `${mode} must sync last serialized seed to live seed`);
   assert.equal(controlWidget.serialize, false, `${mode} control must be workflow-runtime only`);
   assert.deepEqual(node.widgets_values, ["{}", seed, 0], `${mode} must use compact SPM widget serialization`);
+  controlWidget.afterQueued();
+  assert.equal(spmQueuePromptActive(), false);
 }
 
 {
   const { node, seedWidget, controlWidget, seed } = makeNode("fixed", { controlName: "fixed", seed: 3333, serializedSeed: 1111 });
-  setGraphNodesForTest([node]);
+  installSpmSeedControlPersistence(node);
+  installSpmSeedQueueLifecycle(node);
   assert.equal(liveSeedControlMode(node), "fixed");
-  assert.equal(randomizeSpmSeedsBeforeQueue().length, 0);
+  controlWidget.beforeQueued();
   assert.equal(seedWidget.value, seed);
   assert.equal(node.widgets_values[1], seed);
   assert.equal(node.last_serialization.widgets_values[1], seed);
   assert.equal(controlWidget.serialize, false);
+  controlWidget.afterQueued();
 }
 
 {
@@ -272,9 +293,14 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   const { node, seedWidget, controlWidget } = makeNode("randomize");
   const originalBeforeQueued = controlWidget.beforeQueued;
   const originalAfterQueued = controlWidget.afterQueued;
-  setGraphNodesForTest([node]);
-  const queued = randomizeSpmSeedsBeforeQueue();
-  assert.equal(queued.length, 1);
+  assert.equal(installSpmSeedQueueLifecycle(node), true);
+  const installedBeforeQueued = controlWidget.beforeQueued;
+  const installedAfterQueued = controlWidget.afterQueued;
+  assert.equal(installSpmSeedQueueLifecycle(node), true);
+  assert.equal(controlWidget.beforeQueued, installedBeforeQueued);
+  assert.equal(controlWidget.afterQueued, installedAfterQueued);
+  controlWidget.beforeQueued();
+  assert.equal(spmQueuePromptActive(), true);
   assert.equal(seedWidget.value, 987654321);
   assert.equal(seedWidget.callbackCalls, 1);
   assert.equal(node.widgets_values[1], 987654321);
@@ -282,9 +308,10 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   assert.equal(node._spmQueuedSeed.seed, 987654321);
   assert.notEqual(controlWidget.beforeQueued, originalBeforeQueued);
   assert.notEqual(controlWidget.afterQueued, originalAfterQueued);
-  restoreQueuedSpmSeeds(queued);
-  assert.equal(controlWidget.beforeQueued, originalBeforeQueued);
-  assert.equal(controlWidget.afterQueued, originalAfterQueued);
+  seedWidget.value = 1;
+  controlWidget.afterQueued();
+  assert.equal(seedWidget.value, 987654321);
+  assert.equal(spmQueuePromptActive(), false);
 }
 
 {
@@ -293,11 +320,10 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   installSpmSeedControlPersistence(node);
   controlWidget.value = "randomize";
   controlWidget.callback("randomize");
-  setGraphNodesForTest([node]);
-  const queued = randomizeSpmSeedsBeforeQueue();
-  assert.equal(queued.length, 1);
+  installSpmSeedQueueLifecycle(node);
+  controlWidget.beforeQueued();
   assert.equal(seedWidget.value, 987654321);
-  restoreQueuedSpmSeeds(queued);
+  controlWidget.afterQueued();
   assert.equal(node._spmQueuedSeed.seed, 987654321);
 
   controlWidget.value = "fixed";
@@ -305,11 +331,10 @@ for (const mode of ["fixed", "increment", "decrement", "bogus", undefined]) {
   assert.equal(node._spmQueuedSeed, undefined);
   seedWidget.value = 2468;
   seedWidget.callback(2468);
-  setGraphNodesForTest([node]);
-  const fixedQueued = randomizeSpmSeedsBeforeQueue();
-  assert.equal(fixedQueued.length, 0);
+  controlWidget.beforeQueued();
   assert.equal(seedWidget.value, 2468);
   assert.deepEqual(node.widgets_values, ["{}", 2468, 2]);
+  controlWidget.afterQueued();
 }
 """
         run_node_script(script, helper_path)
@@ -373,14 +398,13 @@ assert.equal(selected, "three");
         self.assertIn("function prepareSpmPrivacyForSerialization(graph = defaultGraph())", source)
         self.assertIn("async function waitForSpmPrivacySaves(graph = defaultGraph())", source)
         self.assertIn("await waitForSpmPrivacySaves(graph);", source)
-        self.assertIn("if (spmQueuePromptDepth > 0)", source)
+        self.assertIn("if (spmQueuePromptActive())", source)
         self.assertIn("node._spmPendingPrivacySave = tracked;", source)
         self.assertIn("const output = prompt?.output;", source)
         self.assertIn("outputNode.inputs.spm_data = token;", source)
         self.assertIn("outputNode.is_changed = token;", source)
         self.assertIn("app.graphToPrompt = wrappedGraphToPrompt", source)
         self.assertIn('scheduleSpmGraphToPromptPatch("setup")', source)
-        self.assertNotIn("if (spmQueuePromptDepth <= 0)", source)
         self.assertNotIn("widgets_values[index] = token", source)
         self.assertNotIn("workflow.nodes", source)
 
@@ -496,7 +520,11 @@ assert.equal(searchChangedToken, token, "visual search state must stay cache-neu
         self.assertIn('privacy.showPrivacyKeystoreDialog("auto")', source)
         self.assertIn("const token = privacy?.getStoredPrivacyToken?.();", source)
         self.assertIn("if (token) headers[HELTO_PRIVACY_TOKEN_HEADER] = token;", source)
-        self.assertIn("retryOnUnlock && await unlockSharedPrivacyForError(error)", source)
+        self.assertIn('!(endpoint === "decrypt" && isSharedPrivacySetupError(error))', source)
+        self.assertIn("await isUnreadablePrivacyValueError(error)", source)
+        self.assertIn("await confirmUnreadablePrivacyReset()", source)
+        self.assertIn("The encrypted value was preserved.", source)
+        self.assertIn("Unreadable private prompt library was reset to defaults.", source)
         self.assertIn('const SPM_PRIVACY_RECOVERY_SOURCE = "comfyui-helto-smartprompt";', source)
         self.assertIn("privacy.registerPrivacyRecoveryDescriptors(SPM_PRIVACY_RECOVERY_SOURCE", source)
         self.assertIn("spmLockedPrivacyRecoveryDescriptor", source)
@@ -510,6 +538,10 @@ assert.equal(searchChangedToken, token, "visual search state must stay cache-neu
         self.assertIn("initialUnsupportedEncryptedValue", source)
         self.assertIn("unsupportedPrivacyEnvelopeString(dataWidget.value)", source)
         self.assertIn("unsupportedPrivacyEnvelopeDescription", source)
+        self.assertNotIn(
+            "if (initialUnsupportedEncryptedValue) {\n    dataWidget.value = serializedDefaultState();",
+            source,
+        )
 
     def test_privacy_encryption_failure_blocks_queue_serialization(self):
         helper_path = ROOT / "web/js/smart_prompt_manager.js"

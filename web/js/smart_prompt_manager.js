@@ -17,11 +17,12 @@ const SPM_EXPORT_FORMAT = "comfyui-helto-prompts.smart-prompt-manager.export";
 const SPM_EXPORT_VERSION = 1;
 const HELTO_PRIVACY_MODULE_ROUTE = "/helto_privacy/ui/privacy.js";
 const HELTO_PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";
-const SPM_SEED_QUEUE_WRAPPER_KEY = "__smartPromptManagerSeedQueuePromptWrapper";
-const SPM_SEED_QUEUE_INSTALL_KEY = "__smartPromptManagerSeedQueuePromptInstallScheduled";
+const SPM_SEED_QUEUE_LIFECYCLE_KEY = "__smartPromptManagerSeedQueueLifecycle";
+const SPM_SEED_QUEUE_ACTIVE_KEY = "__smartPromptManagerActiveQueuedSeed";
+const SPM_SEED_QUEUE_MAX_AGE_MS = 10000;
 const SPM_GRAPH_TO_PROMPT_WRAPPER_KEY = "__smartPromptManagerGraphToPromptWrapper";
 const SPM_GRAPH_TO_PROMPT_INSTALL_KEY = "__smartPromptManagerGraphToPromptInstallScheduled";
-const SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT = 80;
+const SPM_GRAPH_TO_PROMPT_INSTALL_ATTEMPT_LIMIT = 80;
 const SPM_WIDGET_THEME_BRIDGE_KEY = "__spmHeltoLiteGraphWidgetThemeBridgeInstalled";
 const SPM_WIDGET_THEME_FALLBACK_KEY = "__spmHeltoLiteGraphWidgetThemeFallbackInstalled";
 const SPM_WIDGET_THEME_SNAPSHOT_KEY = "__spmHeltoLiteGraphWidgetThemeSnapshot";
@@ -31,6 +32,7 @@ const VIRTUAL_FOLDERS = [
   { id: "favorites", name: "Favorites" },
 ];
 let spmQueuePromptDepth = 0;
+let spmQueuePromptDeadline = 0;
 let spmSharedPrivacyModulePromise = null;
 let spmPrivacyRecoveryRegistered = false;
 const KEYS = {
@@ -305,6 +307,48 @@ function isSharedPrivacyUnlockError(error) {
   ].some((code) => message.includes(code));
 }
 
+function isSharedPrivacySetupError(error) {
+  const message = privacyErrorMessage(error);
+  return [
+    "PRIVACY_KEYSTORE_UNINITIALIZED",
+    "PRIVACY_KEYSTORE_INVALID",
+    "PRIVACY_KEY_MISSING",
+    "PRIVACY_KEY_INVALID",
+  ].some((code) => message.includes(code));
+}
+
+async function isUnreadablePrivacyValueError(error) {
+  const privacy = await sharedPrivacyModule();
+  if (typeof privacy?.isUnreadablePrivacyValueError === "function") {
+    return privacy.isUnreadablePrivacyValueError(error);
+  }
+  if (["PRIVACY_LOCKED", "PRIVACY_TOKEN_REQUIRED"].some((code) => privacyErrorMessage(error).includes(code))) {
+    return false;
+  }
+  const message = privacyErrorMessage(error).toLowerCase();
+  return isSharedPrivacySetupError(error)
+    || ["PRIVACY_KEY_MISMATCH", "PRIVACY_DECRYPT_FAILED", "PRIVACY_PAYLOAD_INVALID"]
+      .some((code) => message.includes(code.toLowerCase()))
+    || message.includes("different local privacy key")
+    || message.includes("privacy key file is missing")
+    || message.includes("could not decrypt state payload");
+}
+
+async function isPrivacyKeyUnavailableError(error) {
+  const privacy = await sharedPrivacyModule();
+  if (typeof privacy?.isPrivacyKeyUnavailableError === "function") {
+    return privacy.isPrivacyKeyUnavailableError(error);
+  }
+  return isSharedPrivacySetupError(error)
+    || privacyErrorMessage(error).toLowerCase().includes("privacy key file is missing");
+}
+
+async function confirmUnreadablePrivacyReset() {
+  const privacy = await sharedPrivacyModule();
+  if (typeof privacy?.confirmUnreadablePrivacyReset !== "function") return false;
+  return Boolean(await privacy.confirmUnreadablePrivacyReset());
+}
+
 async function sharedPrivacyModule() {
   if (!spmSharedPrivacyModulePromise) {
     spmSharedPrivacyModulePromise = import(HELTO_PRIVACY_MODULE_ROUTE).catch(() => null);
@@ -338,7 +382,7 @@ async function spmPrivacyPost(endpoint, payload, { retryOnUnlock = true } = {}) 
   }
   if (!response.ok || result.ok === false || result.error) {
     const error = new Error(result.error || text || `Privacy ${endpoint} failed.`);
-    if (retryOnUnlock && await unlockSharedPrivacyForError(error)) {
+    if (retryOnUnlock && !(endpoint === "decrypt" && isSharedPrivacySetupError(error)) && await unlockSharedPrivacyForError(error)) {
       return await spmPrivacyPost(endpoint, payload, { retryOnUnlock: false });
     }
     throw error;
@@ -1308,119 +1352,77 @@ function writeSpmSeedValue(node, seed) {
   return true;
 }
 
-function suspendSeedControlCallbacks(controlWidget) {
-  if (!controlWidget) return null;
-  const beforeQueued = controlWidget.beforeQueued;
-  const afterQueued = controlWidget.afterQueued;
-  const beforeQueuedNoop = () => {};
-  const afterQueuedNoop = () => {};
-  controlWidget.beforeQueued = beforeQueuedNoop;
-  controlWidget.afterQueued = afterQueuedNoop;
-  return {
-    controlWidget,
-    beforeQueued,
-    afterQueued,
-    beforeQueuedNoop,
-    afterQueuedNoop,
-  };
+function markSpmQueuePromptStart() {
+  spmQueuePromptDepth += 1;
+  spmQueuePromptDeadline = Date.now() + SPM_SEED_QUEUE_MAX_AGE_MS;
 }
 
-function restoreSeedControlCallbacks(suspended) {
-  for (const item of suspended) {
-    if (item.controlWidget.beforeQueued === item.beforeQueuedNoop) {
-      item.controlWidget.beforeQueued = item.beforeQueued;
-    }
-    if (item.controlWidget.afterQueued === item.afterQueuedNoop) {
-      item.controlWidget.afterQueued = item.afterQueued;
-    }
-  }
+function markSpmQueuePromptEnd() {
+  spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);
+  if (spmQueuePromptDepth === 0) spmQueuePromptDeadline = 0;
 }
 
-function randomizeSpmSeedsBeforeQueue() {
-  const queuedSeeds = [];
-  for (const node of graphNodes()) {
-    if (!isSmartPromptManagerNode(node)) {
-      continue;
-    }
+function spmQueuePromptActive() {
+  if (spmQueuePromptDepth <= 0) return false;
+  if (Date.now() <= spmQueuePromptDeadline) return true;
+  spmQueuePromptDepth = 0;
+  spmQueuePromptDeadline = 0;
+  return false;
+}
+
+function installSpmSeedQueueLifecycle(node) {
+  if (!isSmartPromptManagerNode(node)) return false;
+  const seedWidget = widgetByName(node, "seed");
+  const target = seedControlWidget(node, seedWidget);
+  if (!seedWidget || !target || target[SPM_SEED_QUEUE_LIFECYCLE_KEY]) return Boolean(target);
+
+  const originalBeforeQueued = target.beforeQueued;
+  const originalAfterQueued = target.afterQueued;
+  target.beforeQueued = function (...args) {
+    markSpmQueuePromptStart();
     syncSpmSerializedWidgetValues(node);
     if (liveSeedControlMode(node) !== "randomize") {
-      delete node._spmQueuedSeed;
-      continue;
+      delete node[SPM_SEED_QUEUE_ACTIVE_KEY];
+      clearQueuedSeedUnlessRandomize(node);
+      try {
+        return originalBeforeQueued?.apply(this, args);
+      } catch (error) {
+        markSpmQueuePromptEnd();
+        throw error;
+      }
     }
-    const seedWidget = widgetByName(node, "seed");
-    const controlWidget = seedControlWidget(node, seedWidget);
     const seed = randomSeed();
     if (!writeSpmSeedValue(node, seed)) {
-      continue;
+      try {
+        return originalBeforeQueued?.apply(this, args);
+      } catch (error) {
+        markSpmQueuePromptEnd();
+        throw error;
+      }
     }
     node._spmQueuedSeed = { seed, at: Date.now() };
-    queuedSeeds.push({
-      node,
-      seed,
-      suspended: suspendSeedControlCallbacks(controlWidget),
-    });
-  }
-  return queuedSeeds;
-}
-
-function restoreQueuedSpmSeeds(queuedSeeds) {
-  restoreSeedControlCallbacks(queuedSeeds.map((item) => item.suspended).filter(Boolean));
-  for (const { node, seed } of queuedSeeds) {
-    const queuedSeed = node?._spmQueuedSeed;
-    if (!queuedSeed || queuedSeed.seed !== seed || Date.now() - queuedSeed.at > 10000) {
-      continue;
-    }
-    if (Number(widgetByName(node, "seed")?.value) !== Number(seed)) {
-      writeSpmSeedValue(node, seed);
-    }
-  }
-}
-// ---- End seed queue helpers ----
-
-function installSpmSeedQueuePatch(_source = "install") {
-  if (typeof app.queuePrompt !== "function") {
-    return false;
-  }
-  if (app.queuePrompt[SPM_SEED_QUEUE_WRAPPER_KEY]) {
-    return true;
-  }
-
-  const originalQueuePrompt = app.queuePrompt;
-  const wrappedQueuePrompt = async function (...args) {
-    const queuedSeeds = randomizeSpmSeedsBeforeQueue();
-    spmQueuePromptDepth += 1;
+    node[SPM_SEED_QUEUE_ACTIVE_KEY] = { seed, at: Date.now() };
+    return undefined;
+  };
+  target.afterQueued = function (...args) {
     try {
-      return await originalQueuePrompt.apply(this, args);
+      const queued = node[SPM_SEED_QUEUE_ACTIVE_KEY];
+      delete node[SPM_SEED_QUEUE_ACTIVE_KEY];
+      if (!queued || Date.now() - queued.at > SPM_SEED_QUEUE_MAX_AGE_MS) {
+        return originalAfterQueued?.apply(this, args);
+      }
+      if (Number(seedWidget.value) !== Number(queued.seed)) {
+        writeSpmSeedValue(node, queued.seed);
+      }
+      return undefined;
     } finally {
-      spmQueuePromptDepth = Math.max(0, spmQueuePromptDepth - 1);
-      restoreQueuedSpmSeeds(queuedSeeds);
+      markSpmQueuePromptEnd();
     }
   };
-  Object.defineProperty(wrappedQueuePrompt, SPM_SEED_QUEUE_WRAPPER_KEY, {
-    value: true,
-    configurable: true,
-  });
-  app.queuePrompt = wrappedQueuePrompt;
+  Object.defineProperty(target, SPM_SEED_QUEUE_LIFECYCLE_KEY, { value: true });
   return true;
 }
-
-function scheduleSpmSeedQueuePatch(source = "top-level") {
-  if (globalThis[SPM_SEED_QUEUE_INSTALL_KEY]) {
-    installSpmSeedQueuePatch(`${source}:resync`);
-    return;
-  }
-  globalThis[SPM_SEED_QUEUE_INSTALL_KEY] = true;
-
-  let attempts = 0;
-  function attempt() {
-    attempts += 1;
-    installSpmSeedQueuePatch(`${source}:${attempts}`);
-    if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
-      setTimeout(attempt, 250);
-    }
-  }
-  attempt();
-}
+// ---- End seed queue helpers ----
 
 function liveSpmExecutionState(node, outputNode = null) {
   const exposed = node?._spmExecutionState;
@@ -1513,7 +1515,7 @@ function installSpmGraphToPromptPatch(_source = "install") {
     const graph = args[0] || this?.graph || defaultGraph();
     await waitForSpmPrivacySaves(graph);
     const prompt = await originalGraphToPrompt.apply(this, args);
-    if (spmQueuePromptDepth > 0) {
+    if (spmQueuePromptActive()) {
       return await applySpmCacheTokensToPrompt(prompt, graph);
     }
     return prompt;
@@ -1537,7 +1539,7 @@ function scheduleSpmGraphToPromptPatch(source = "top-level") {
   function attempt() {
     attempts += 1;
     installSpmGraphToPromptPatch(`${source}:${attempts}`);
-    if (attempts < SPM_SEED_QUEUE_INSTALL_ATTEMPT_LIMIT) {
+    if (attempts < SPM_GRAPH_TO_PROMPT_INSTALL_ATTEMPT_LIMIT) {
       setTimeout(attempt, 250);
     }
   }
@@ -1775,6 +1777,7 @@ function injectStyles() {
 function enhanceNode(node) {
   injectStyles();
   applySpmNodeTheme(node);
+  installSpmSeedQueueLifecycle(node);
   const dataWidget = node.widgets?.find((widget) => widget.name === SPM_PRIVACY_FIELD);
   if (!dataWidget || node.__spmEnhanced) return;
   node.__spmEnhanced = true;
@@ -1786,7 +1789,7 @@ function enhanceNode(node) {
   const initialUnsupportedEncryptedValue = initialEncryptedValue ? "" : unsupportedPrivacyEnvelopeString(dataWidget.value);
   let state = initialEncryptedValue || initialUnsupportedEncryptedValue ? defaultState() : parseState(dataWidget.value);
   let status = initialUnsupportedEncryptedValue
-    ? `This workflow uses an ${unsupportedPrivacyEnvelopeDescription(initialUnsupportedEncryptedValue)} that this version cannot decrypt.`
+    ? "Private prompt library could not be read. The encrypted value was preserved."
     : initialEncryptedValue ? "Decrypting private prompt library..." : "";
   let autocomplete = { open: false, items: [], active: 0, start: 0, end: 0, partial: "" };
   let tooltip = null;
@@ -1835,14 +1838,14 @@ function enhanceNode(node) {
   function syncWidgetSizingCallbacks() {
     if (!uiWidget) return;
     if (shouldUseVueLayout()) {
-      uiWidget.computeLayoutSize = undefined;
+      delete uiWidget.computeLayoutSize;
       uiWidget.computeSize = undefined;
-      uiWidget.getMinHeight = () => panelHeight();
-      uiWidget.getMaxHeight = () => panelHeight();
-      uiWidget.getHeight = () => panelHeight();
+      uiWidget.getMinHeight = () => PANEL_MIN_HEIGHT;
+      uiWidget.getMaxHeight = undefined;
+      uiWidget.getHeight = () => PANEL_DEFAULT_HEIGHT;
       if (uiWidget.options) {
         uiWidget.options.getMinHeight = uiWidget.getMinHeight;
-        uiWidget.options.getMaxHeight = uiWidget.getMaxHeight;
+        delete uiWidget.options.getMaxHeight;
         uiWidget.options.getHeight = uiWidget.getHeight;
       }
       return;
@@ -1868,21 +1871,24 @@ function enhanceNode(node) {
   function syncPanelSize({ dirty = true } = {}) {
     refreshNodeTheme();
     syncWidgetSizingCallbacks();
-    const legacyLayout = uiWidget && !shouldUseVueLayout();
+    const vueLayout = shouldUseVueLayout();
+    const legacyLayout = uiWidget && !vueLayout;
+    const stablePanelHeight = panelHeight();
     widgetFrame.style.boxSizing = "border-box";
     widgetFrame.style.margin = "0";
     widgetFrame.style.width = "100%";
-    widgetFrame.style.height = `${panelHeight()}px`;
-    widgetFrame.style.minHeight = `${panelHeight()}px`;
-    widgetFrame.style.maxHeight = `${panelHeight()}px`;
+    widgetFrame.style.height = vueLayout ? "100%" : `${stablePanelHeight}px`;
+    widgetFrame.style.minHeight = vueLayout ? `${PANEL_MIN_HEIGHT}px` : `${stablePanelHeight}px`;
+    widgetFrame.style.maxHeight = vueLayout ? "none" : `${stablePanelHeight}px`;
     // Fill the widget area edge-to-edge and let the root's symmetric padding
     // form the gap to the node body, so left/right/bottom margins all match.
     // (Forcing a pixel width here left-aligned the panel and pushed the slack
     // onto the right side.)
     root.style.width = legacyLayout ? `calc(100% - ${PANEL_HORIZONTAL_GUTTER * 2}px)` : "100%";
     root.style.margin = legacyLayout ? `0 ${PANEL_HORIZONTAL_GUTTER}px` : "0";
-    root.style.height = `${panelHeight()}px`;
-    root.style.maxHeight = `${panelHeight()}px`;
+    root.style.height = vueLayout ? "100%" : `${stablePanelHeight}px`;
+    root.style.minHeight = vueLayout ? `${PANEL_MIN_HEIGHT}px` : `${stablePanelHeight}px`;
+    root.style.maxHeight = vueLayout ? "none" : `${stablePanelHeight}px`;
     syncLegacyWidgetBounds();
     if (dirty) node.graph?.setDirtyCanvas(true, true);
   }
@@ -2026,6 +2032,40 @@ function enhanceNode(node) {
       status = result.warnings?.length ? `Privacy mode unlocked with ${result.warnings.length} warning(s).` : "Privacy mode unlocked.";
       saveWithoutRender();
     } catch (error) {
+      if (await isUnreadablePrivacyValueError(error)) {
+        if (!await confirmUnreadablePrivacyReset()) {
+          privacyLocked = true;
+          privacyIncompatible = false;
+          setSpmRecoveryLockedState(node, true);
+          status = "Private prompt library could not be decrypted. The encrypted value was preserved.";
+          return false;
+        }
+        const keyUnavailable = await isPrivacyKeyUnavailableError(error);
+        encryptSequence += 1;
+        forgetPrivacyEnvelope(node, SPM_PRIVACY_FIELD);
+        delete node._spmExecutionState;
+        state = defaultState();
+        state.privacyMode = !keyUnavailable;
+        privacyLocked = false;
+        privacyIncompatible = false;
+        setSpmRecoveryLockedState(node, false);
+        syncSpmRecoveryPrivacyModeProperty(node, state.privacyMode);
+        if (state.privacyMode) {
+          try {
+            await encryptAndSetWidget(normalizedSnapshot(state), { renderAfter: false });
+          } catch {
+            state.privacyMode = false;
+            syncSpmRecoveryPrivacyModeProperty(node, false);
+            setWidgetValue(node, dataWidget, state);
+          }
+        } else {
+          setWidgetValue(node, dataWidget, state);
+        }
+        status = "Unreadable private prompt library was reset to defaults.";
+        exposeExecutionState();
+        syncSpmSerializedWidgetValues(node, { spmDataValue: dataWidget.value, dirty: true });
+        return false;
+      }
       privacyLocked = true;
       setSpmRecoveryLockedState(node, true);
       status = `Privacy error: ${error.message}`;
@@ -3294,7 +3334,7 @@ function enhanceNode(node) {
       return;
     }
     if (action === "reset-private-data") {
-      if (!confirm("Reset encrypted prompt data for this node? This discards the encrypted library stored for this node.")) return;
+      if (!await confirmUnreadablePrivacyReset()) return;
       privacyLocked = false;
       privacyIncompatible = false;
       privacyBusy = false;
@@ -3510,9 +3550,8 @@ function enhanceNode(node) {
     uiWidget = node.addDOMWidget("smart_prompt_manager_ui", "SmartPromptManager", widgetFrame, {
       serialize: false,
       hideOnZoom: false,
-      getMinHeight: () => panelHeight(),
-      getMaxHeight: () => panelHeight(),
-      getHeight: () => panelHeight(),
+      getMinHeight: () => PANEL_MIN_HEIGHT,
+      getHeight: () => PANEL_DEFAULT_HEIGHT,
       onDraw: () => syncPanelSize({ dirty: false }),
     });
     syncWidgetSizingCallbacks();
@@ -3528,14 +3567,12 @@ function enhanceNode(node) {
   if (initialEncryptedValue) void decryptInitialState();
 }
 
-scheduleSpmSeedQueuePatch();
 scheduleSpmGraphToPromptPatch();
 void registerSpmPrivacyRecovery();
 
 app.registerExtension({
   name: EXTENSION_NAME,
   setup() {
-    scheduleSpmSeedQueuePatch("setup");
     scheduleSpmGraphToPromptPatch("setup");
     void registerSpmPrivacyRecovery();
     installSpmWidgetThemeBridge();
