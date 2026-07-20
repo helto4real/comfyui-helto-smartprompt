@@ -11,9 +11,7 @@ Core files:
 - `nodes.py`: ComfyUI backend node and HTTP privacy routes.
 - `resolver.py`: deterministic variable resolution.
 - `schema.py`: state defaults, normalization, and merge helpers.
-- `managed_privacy.py`: shared privacy profile declarations and workflow adapters.
-- `managed_import_export.py`: managed private import/export and legacy migration.
-- `managed_execution.py`: protected prompt resolution and execution adapters.
+- `privacy.py`: local AES-GCM workflow encryption helpers.
 - `validation.py`: state warning generation.
 - `web/js/smart_prompt_manager.js`: frontend extension and custom node UI.
 - `tests/`: standard-library `unittest` tests.
@@ -29,18 +27,11 @@ Core files:
 
 ## Privacy Mode
 
-Privacy mode is owned by the shared `helto-privacy` runtime. The Smart Prompt
-profile binds workflow serialization, execution, import/export, recovery, and
-legacy readers to shared handles. Missing or mismatched shared runtime state
-must block generically; do not add local crypto, token, route, retry, or
-fallback policy.
+Privacy mode encrypts `spm_data` using a local key file:
 
-Historical Smart Prompt v1 data is accepted only through the declared shared
-legacy readers and explicit key-import/migration path. Never add a legacy
-writer or silently replace unreadable encrypted bytes.
-
-The repository has no local privacy codec. Keep all privacy mechanics in the
-shared runtime and consumer adapters.
+- key path: `config/privacy_key.json`
+- algorithm: AES-256-GCM via Python `cryptography`
+- encrypted workflows cannot be recovered without the matching key
 
 Never write the key into workflow JSON, exported prompt JSON, README examples, tests, or logs.
 

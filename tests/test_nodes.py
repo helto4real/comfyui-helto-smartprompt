@@ -1,8 +1,9 @@
-import math
+import json
 import unittest
 from unittest.mock import patch
 
 from nodes import SmartPromptManager
+from privacy import ALGORITHM, ENVELOPE_SCHEMA, LEGACY_ENVELOPE_SCHEMA
 from schema import default_state, state_to_json
 
 
@@ -36,117 +37,117 @@ class SmartPromptManagerNodeTests(unittest.TestCase):
         }
         return state
 
+    def _extra_pnginfo(self, node_id, spm_data):
+        return {
+            "workflow": {
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "type": "SmartPromptManager",
+                        "widgets_values": [spm_data, 123, 0],
+                    }
+                ]
+            }
+        }
+
     def test_seed_input_exposes_comfy_seed_control(self):
-        inputs = SmartPromptManager.INPUT_TYPES()
-        required = inputs["required"]
+        required = SmartPromptManager.INPUT_TYPES()["required"]
         self.assertEqual(required["seed"][1]["control_after_generate"], "fixed")
-        self.assertEqual(
-            set(inputs["optional"]),
-            {"privacy_mode_reference", "private_execution"},
-        )
-        self.assertTrue(inputs["optional"]["privacy_mode_reference"][1]["hidden"])
-        self.assertTrue(inputs["optional"]["private_execution"][1]["hidden"])
 
     def test_legacy_spm_data_still_resolves_directly(self):
         state = self._state_with_prompt()
         result = SmartPromptManager().resolve(state_to_json(state), seed=1, reroll=0)
         self.assertEqual(result[0], "A dreamy portrait")
 
-    def test_live_execution_requires_managed_subject_reference(self):
+    def test_cache_token_resolves_saved_workflow_spm_data(self):
         state = self._state_with_prompt()
-        with self.assertRaisesRegex(
-            ValueError,
-            "PRIVACY_SUBJECT_MODE_REFERENCE_INVALID",
-        ):
-            SmartPromptManager().resolve(
-                state_to_json(state),
-                seed=1,
-                reroll=0,
-                unique_id="7",
-            )
-
-    def test_private_subject_requires_managed_execution_reference(self):
-        state = self._state_with_prompt()
-        lease = object()
-        context = unittest.mock.MagicMock()
-        context.__enter__.return_value = lease
-        context.__exit__.return_value = False
-        with (
-            patch("nodes.consume_smart_prompt_subject_mode", return_value=context),
-            patch(
-                "nodes.smart_prompt_subject_requires_private_execution",
-                return_value=True,
-            ),
-        ):
-            with self.assertRaisesRegex(
-                ValueError,
-                "PRIVACY_EXECUTION_REFERENCE_INVALID",
-            ):
-                SmartPromptManager().resolve(
-                    state_to_json(state),
-                    seed=1,
-                    reroll=0,
-                    unique_id="7",
-                    privacy_mode_reference="{}",
-                )
-
-    def test_private_subject_dispatches_only_the_managed_reference(self):
-        state = self._state_with_prompt()
-        expected = ("resolved", "raw", "name", "variables", "selected", "warnings")
-        lease = object()
-        context = unittest.mock.MagicMock()
-        context.__enter__.return_value = lease
-        context.__exit__.return_value = False
-        with (
-            patch("nodes.consume_smart_prompt_subject_mode", return_value=context),
-            patch(
-                "nodes.smart_prompt_subject_requires_private_execution",
-                return_value=True,
-            ),
-            patch(
-                "nodes.dispatch_smart_prompt_managed_execution",
-                return_value=expected,
-            ) as dispatch,
-        ):
-            actual = SmartPromptManager().resolve(
-                state_to_json(state),
-                seed=9,
-                reroll=2,
-                unique_id="7",
-                privacy_mode_reference="{}",
-                private_execution='{"reference":"opaque"}',
-            )
-        self.assertEqual(actual, expected)
-        dispatch.assert_called_once_with(
-            '{"reference":"opaque"}',
-            subject_id="7",
-            seed=9,
-            reroll=2,
-        )
-
-    def test_protected_state_never_falls_back_to_public_parsing(self):
-        envelope = {
-            "encrypted": True,
-            "ciphertext": "ciphertext",
-        }
-        with self.assertRaisesRegex(
-            ValueError,
-            "PRIVACY_EXECUTION_REFERENCE_INVALID",
-        ):
-            SmartPromptManager().resolve(
-                state_to_json(envelope),
-                seed=1,
-                reroll=0,
-            )
-
-    def test_private_execution_disables_comfy_cache(self):
-        changed = SmartPromptManager.IS_CHANGED(
-            state_to_json(self._state_with_prompt()),
+        token = "spm-cache-v1:" + "a" * 64
+        result = SmartPromptManager().resolve(
+            token,
             seed=1,
             reroll=0,
-            private_execution='{"reference":"opaque"}',
+            unique_id="7",
+            extra_pnginfo=self._extra_pnginfo(7, state_to_json(state)),
         )
-        self.assertTrue(math.isnan(changed))
+        self.assertEqual(result[0], "A dreamy portrait")
+
+    def test_cache_token_resolves_encrypted_workflow_spm_data(self):
+        state = self._state_with_prompt()
+        envelope = {
+            "version": 1,
+            "schema": ENVELOPE_SCHEMA,
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "test-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+        token = "spm-cache-v1:" + "b" * 64
+        with patch("nodes.decrypt_state", return_value=(state, [])) as decrypt_state:
+            result = SmartPromptManager().resolve(
+                token,
+                seed=1,
+                reroll=0,
+                unique_id="7",
+                extra_pnginfo=self._extra_pnginfo("7", envelope),
+            )
+        decrypt_state.assert_called_once_with(envelope)
+        self.assertEqual(result[0], "A dreamy portrait")
+
+    def test_legacy_encrypted_workflow_spm_data_warns_without_decrypting(self):
+        envelope = {
+            "version": 1,
+            "schema": LEGACY_ENVELOPE_SCHEMA,
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "legacy-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+        token = "spm-cache-v1:" + "d" * 64
+
+        result = SmartPromptManager().resolve(
+            token,
+            seed=1,
+            reroll=0,
+            unique_id="7",
+            extra_pnginfo=self._extra_pnginfo("7", envelope),
+        )
+
+        warnings = json.loads(result[5])["warnings"]
+        self.assertEqual(result[0], "")
+        self.assertTrue(any("unsupported legacy privacy schema" in warning for warning in warnings))
+
+    def test_unknown_encrypted_workflow_spm_data_stays_protected(self):
+        envelope = {
+            "version": 2,
+            "schema": "future.smart-prompt-manager",
+            "encrypted": True,
+            "algorithm": ALGORITHM,
+            "keyId": "future-key",
+            "nonce": "nonce",
+            "ciphertext": "ciphertext",
+        }
+        token = "spm-cache-v1:" + "e" * 64
+
+        result = SmartPromptManager().resolve(
+            token,
+            seed=1,
+            reroll=0,
+            unique_id="7",
+            extra_pnginfo=self._extra_pnginfo("7", envelope),
+        )
+
+        warnings = json.loads(result[5])["warnings"]
+        self.assertEqual(result[0], "")
+        self.assertTrue(any("unsupported encrypted privacy schema" in warning for warning in warnings))
+
+    def test_cache_token_without_workflow_metadata_warns_readably(self):
+        token = "spm-cache-v1:" + "c" * 64
+        result = SmartPromptManager().resolve(token, seed=1, reroll=0, unique_id="7", extra_pnginfo={})
+        warnings = json.loads(result[5])["warnings"]
+        self.assertTrue(any("cache token" in warning.lower() for warning in warnings))
+        self.assertEqual(result[0], "")
 
 
 if __name__ == "__main__":
